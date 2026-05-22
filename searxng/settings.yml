@@ -1,0 +1,67 @@
+use_default_settings: true
+
+general:
+  instance_name: "TenderHack Search"
+  contact_url: false
+  debug: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "ru-RU"
+  languages:
+    - ru-RU
+    - ru
+  formats:
+    - html
+    - json
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "tenderhack_secret_key_2026_spb"
+  public_instance: false
+  image_proxy: false
+  limiter: false
+
+ui:
+  static_use_hash: false
+  default_theme: simple
+  default_locale: ru
+  query_in_title: false
+
+redis:
+  url: false
+
+outgoing:
+  request_timeout: 12.0
+  max_request_timeout: 30.0
+  useragent_suffix: ""
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true
+
+engines:
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    categories: general
+    weight: 2
+
+  - name: bing
+    engine: bing
+    shortcut: bi
+    categories: general
+    weight: 1
+
+  - name: google
+    engine: google
+    shortcut: g
+    categories: general
+    language: ru
+    weight: 1
+
+enabled_plugins:
+  - 'Hash plugin'
+  - 'Self Informations'
+  - 'Tracker URL remover'

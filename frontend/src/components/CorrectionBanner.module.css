@@ -1,0 +1,28 @@
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(0,229,176,0.06);
+  border: 1px solid rgba(0,229,176,0.2);
+  border-radius: var(--radius-md);
+  padding: 12px 18px;
+  max-width: 900px;
+  margin: 0 auto 16px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  animation: fadeUp 0.3s ease;
+}
+.icon {
+  width: 16px;
+  height: 16px;
+  color: var(--accent-3);
+  flex-shrink: 0;
+}
+.original {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+.corrected {
+  color: var(--accent-3);
+  font-weight: 600;
+}

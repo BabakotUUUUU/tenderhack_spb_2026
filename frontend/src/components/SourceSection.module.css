@@ -1,0 +1,61 @@
+.section {
+  animation: fadeUp 0.4s ease;
+}
+
+.header {
+  margin-bottom: 20px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.titleRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sourceBadge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid;
+  border-radius: var(--radius-sm);
+  padding: 7px 14px;
+}
+.sourceDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.sourceName {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.countBadge {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.priceRange {
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+.priceRange strong {
+  color: var(--text-primary);
+}
+.avgPrice {
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+}

@@ -1,0 +1,25 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 48px;
+  animation: fadeUp 0.4s ease;
+}
+
+.noResults {
+  text-align: center;
+  padding: 80px 0;
+}
+.noResultsIcon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+.noResultsTitle {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.noResultsSub {
+  color: var(--text-muted);
+  font-size: 15px;
+}

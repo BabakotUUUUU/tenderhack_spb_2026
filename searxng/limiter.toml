@@ -1,0 +1,23 @@
+# SearXNG Limiter configuration
+# Отключаем bot-detection и rate limiting для локального использования
+# (наш backend — единственный клиент, никаких внешних пользователей)
+
+[real_ip]
+  x_for = 1
+  ipv4_prefix = 32
+  ipv6_prefix = 48
+
+[botdetection.ip_limit]
+  # Отключаем проверку токенов — backend обращается без браузерных cookies
+  link_token = false
+
+[botdetection.ip_lists]
+  # Разрешаем локальную сеть Docker без ограничений
+  pass_ip = [
+    "127.0.0.1",
+    "::1",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "10.0.0.0/8"
+  ]
+  block_ip = []

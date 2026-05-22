@@ -1,0 +1,70 @@
+.wrap {
+  max-width: 1280px;
+  margin: 0 auto 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: fadeUp 0.3s ease;
+}
+
+.totalBadge {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+.totalBadge strong {
+  color: var(--text-primary);
+}
+
+.tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 9px 16px;
+  border-radius: var(--radius-md);
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.18s;
+  white-space: nowrap;
+}
+.tab:hover {
+  border-color: var(--border-bright);
+  color: var(--text-primary);
+}
+.tabActive {
+  background: rgba(61,127,255,0.08);
+  border-color: var(--tab-color, var(--accent));
+  color: var(--text-primary);
+}
+
+.tabDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.tabName {
+  font-weight: 500;
+}
+.tabCount {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.tabPrice {
+  font-size: 12px;
+  color: var(--text-muted);
+}

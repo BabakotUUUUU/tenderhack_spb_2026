@@ -1,0 +1,17 @@
+.wrap { display: flex; flex-direction: column; gap: 48px; }
+.section { display: flex; flex-direction: column; gap: 20px; }
+.sectionHeader { height: 36px; width: 220px; border-radius: var(--radius-sm); }
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+}
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.img { height: 180px; width: 100%; }
+.body { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.line { border-radius: 4px; }
