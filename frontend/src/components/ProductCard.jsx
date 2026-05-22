@@ -12,8 +12,9 @@ export default function ProductCard({ item, accentColor }) {
   const [imgError, setImgError] = useState(false)
   const [expanded, setExpanded] = useState(false)
 
-  const chars = Object.entries(item.characteristics || {}).slice(0, 4)
-  const hasChars = chars.length > 0
+  const allChars = Object.entries(item.characteristics || {})
+  const chars = expanded ? allChars : allChars.slice(0, 4)
+  const hasChars = allChars.length > 0
 
   return (
     <article className={styles.card} style={{ '--card-accent': accentColor }}>
@@ -43,6 +44,14 @@ export default function ProductCard({ item, accentColor }) {
               <path d="M8 1l1.8 3.6L14 5.5l-3 2.9.7 4.1L8 10.4l-3.7 2.1.7-4.1-3-2.9 4.2-.9L8 1z" fill="currentColor"/>
             </svg>
             {item.rating.toFixed(1)}
+            {item.reviews_count > 0 && (
+              <span className={styles.reviewsCount}>{item.reviews_count} отз.</span>
+            )}
+          </div>
+        )}
+        {item.relevance_score > 0.5 && (
+          <div className={styles.relevanceBadge}>
+            {Math.round(item.relevance_score * 100)}%
           </div>
         )}
       </div>
@@ -65,9 +74,9 @@ export default function ProductCard({ item, accentColor }) {
           </div>
         )}
 
-        {hasChars && (
+        {allChars.length > 4 && (
           <button className={styles.expandBtn} onClick={() => setExpanded(e => !e)}>
-            {expanded ? '↑ Скрыть' : '↓ Характеристики'}
+            {expanded ? '↑ Скрыть' : `↓ Ещё ${allChars.length - 4}`}
           </button>
         )}
 
@@ -88,7 +97,7 @@ export default function ProductCard({ item, accentColor }) {
                 <polyline points="15 3 21 3 21 9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
                 <line x1="10" y1="14" x2="21" y2="3" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
               </svg>
-              Перейти
+              Открыть источник
             </a>
           )}
         </div>

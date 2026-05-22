@@ -40,14 +40,19 @@ class ProductItem:
     """Унифицированная структура товарной позиции."""
     title: str
     price: Optional[float]
+    id: Optional[str] = None
     currency: str = "RUB"
+    old_price: Optional[float] = None
     image_url: Optional[str] = None
     product_url: str = ""
     source: str = ""
+    domain: Optional[str] = None
     characteristics: dict = field(default_factory=dict)
+    availability: Optional[str] = None
     rating: Optional[float] = None
     reviews_count: Optional[int] = None
     relevance_score: Optional[float] = None  # заполняется ML-ранкером
+    relevance_explanation: Optional[str] = None
 
 
 class RateLimiter:

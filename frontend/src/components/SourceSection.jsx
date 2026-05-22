@@ -30,7 +30,12 @@ export default function SourceSection({ data }) {
           <div className={styles.countBadge}>
             {data.total_found} {plural(data.total_found, ['предложение', 'предложения', 'предложений'])}
           </div>
+          {data.status && data.status !== 'success' && (
+            <div className={styles.statusBadge}>{data.status}</div>
+          )}
         </div>
+
+        {data.warning && <div className={styles.warning}>{data.warning}</div>}
 
         {prices.length > 0 && (
           <div className={styles.priceRange}>

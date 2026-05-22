@@ -5,6 +5,7 @@
 }
 
 .wrap {
+  position: relative;
   display: flex;
   align-items: center;
   background: var(--bg-card);
@@ -14,6 +15,61 @@
   gap: 8px;
   transition: border-color 0.2s, box-shadow 0.2s;
   box-shadow: var(--shadow-card);
+}
+
+.suggestions {
+  position: absolute;
+  left: 48px;
+  right: 230px;
+  top: calc(100% + 8px);
+  z-index: 100;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+}
+
+.suggestions button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  padding: 10px 12px;
+  border-radius: 8px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.suggestions button:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.examples {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.examples button {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 7px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.examples button:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--accent);
 }
 .wrapFocused {
   border-color: var(--accent);
@@ -129,4 +185,5 @@
   .divider, .regionWrap { display: none; }
   .input { font-size: 15px; }
   .btn { padding: 11px 18px; }
+  .suggestions { left: 12px; right: 12px; }
 }

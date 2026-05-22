@@ -1,33 +1,5 @@
 services:
-  # ─── SearXNG (self-hosted поисковый агрегатор для 4-го источника) ──────────
-  # Полностью open-source, бесплатный, self-hosted
-  # Агрегирует DuckDuckGo, Bing, Google без API-ключей
-  searxng:
-    image: searxng/searxng:latest
-    container_name: tenderhack_searxng
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./searxng:/etc/searxng:rw
-    environment:
-      - SEARXNG_BASE_URL=http://localhost:8080/
-    cap_drop:
-      - ALL
-    cap_add:
-      - CHOWN
-      - SETGID
-      - SETUID
-    networks:
-      - tenderhack_net
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-
-  # ─── Backend (FastAPI) ─────────────────────────────────────────────────────
+  # ─── Backend (FastAPI + Playwright + Crawler + SQLite) ─────────────────────
   backend:
     build:
       context: ./backend
@@ -37,12 +9,16 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - SEARXNG_URL=http://searxng:8080
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
-    depends_on:
-      searxng:
-        condition: service_healthy
+      - CACHE_ENABLED=${CACHE_ENABLED:-true}
+      - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS:-1200}
+      - PARSER_TIMEOUT_SECONDS=${PARSER_TIMEOUT_SECONDS:-35}
+      - CRAWLER_DB_PATH=/data/runet_index.db
+      - CRAWLER_MAX_PAGES_PER_DOMAIN=${CRAWLER_MAX_PAGES_PER_DOMAIN:-20}
+      - CRAWLER_WORKERS=${CRAWLER_WORKERS:-3}
+    volumes:
+      - crawler_data:/data
     networks:
       - tenderhack_net
     healthcheck:
@@ -50,7 +26,7 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 15s
+      start_period: 30s
 
   # ─── Frontend (React + Nginx) ──────────────────────────────────────────────
   frontend:
@@ -66,6 +42,10 @@ services:
         condition: service_healthy
     networks:
       - tenderhack_net
+
+volumes:
+  crawler_data:
+    driver: local
 
 networks:
   tenderhack_net:

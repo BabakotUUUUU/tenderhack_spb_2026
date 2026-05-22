@@ -4,6 +4,7 @@ import ResultsSection from './components/ResultsSection.jsx'
 import Header from './components/Header.jsx'
 import CorrectionBanner from './components/CorrectionBanner.jsx'
 import StatsBar from './components/StatsBar.jsx'
+import ErrorState from './components/ErrorState.jsx'
 import styles from './App.module.css'
 import { searchProducts } from './utils/api.js'
 
@@ -51,10 +52,12 @@ export default function App() {
           <SearchBar onSearch={handleSearch} loading={loading} />
         </section>
 
-        {results?.was_corrected && (
+        {results && (
           <CorrectionBanner
             original={results.original_query}
-            corrected={results.corrected_query}
+            corrected={results.query?.corrected || results.corrected_query}
+            variants={results.search_variants || results.query?.expanded || []}
+            synonyms={results.used_synonyms || results.query?.used_synonyms || {}}
           />
         )}
 
@@ -74,11 +77,15 @@ export default function App() {
         )}
 
         {(results || loading) && (
-          <ResultsSection
-            results={results}
-            loading={loading}
-            activeSource={activeSource}
-          />
+          results && !loading && results.total_items === 0 ? (
+            <ErrorState query={results.original_query} warnings={results.meta?.warnings || []} />
+          ) : (
+            <ResultsSection
+              results={results}
+              loading={loading}
+              activeSource={activeSource}
+            />
+          )
         )}
 
         {!results && !loading && (

@@ -9,3 +9,10 @@ export async function searchProducts(query, region = 'Москва', limit = 12)
   }
   return resp.json()
 }
+
+export async function fetchSuggest(q) {
+  const params = new URLSearchParams({ q })
+  const resp = await fetch(`${BASE}/search/suggest?${params}`)
+  if (!resp.ok) return []
+  return (await resp.json()).suggestions || []
+}

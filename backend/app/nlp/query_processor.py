@@ -93,6 +93,12 @@ SYNONYM_MAP: dict[str, list[str]] = {
     "наушники": ["headphones", "гарнитура", "беспроводные наушники", "tws"],
     "веб-камера": ["webcam", "камера для компьютера"],
     "роутер": ["router", "маршрутизатор", "wifi роутер", "вай фай роутер"],
+    "игровой ноутбук": ["gaming laptop", "ноутбук для игр", "геймерский ноутбук"],
+    "usb-накопитель": ["флешка", "usb флеш накопитель", "флэшка"],
+    "шины r16": ["шины 205/55 r16", "резина r16", "16 радиус"],
+    "шины r17": ["шины 225/45 r17", "резина r17", "17 радиус"],
+    "шины r18": ["шины 235/45 r18", "резина r18", "18 радиус"],
+    "картридж": ["toner", "тонер", "чернила для принтера", "расходник"],
 }
 
 # Обратный индекс: синоним → канонический термин
@@ -124,6 +130,15 @@ TYPO_MAP: dict[str, str] = {
     "принер": "принтер",
     "сканнер": "сканер",
     "прожектор": "проектор",
+    "беспроводная мышь": "мышь беспроводная",
+    "беспроводная клавиатура": "клавиатура беспроводная",
+    "веб камера": "веб-камера",
+    "вебкамера": "веб-камера",
+    "ноутбук игровой": "игровой ноутбук",
+    "зимняя резина": "зимние шины",
+    "летняя резина": "летние шины",
+    "мышка": "мышь",
+    "флешка": "usb-накопитель",
 }
 
 
@@ -132,8 +147,29 @@ TYPO_MAP: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def _normalize(text: str) -> str:
+    text = _fix_keyboard_layout(text)
     text = text.strip().lower()
     text = re.sub(r"\s+", " ", text)
+    return text
+
+
+_EN_TO_RU_LAYOUT = str.maketrans(
+    "qwertyuiop[]asdfghjkl;'zxcvbnm,./`",
+    "йцукенгшщзхъфывапролджэячсмитьбю.ё",
+)
+
+
+def _fix_keyboard_layout(text: str) -> str:
+    """Исправляет простую ошибку раскладки, не трогая латинские бренды."""
+    stripped = text.strip()
+    if stripped and re.fullmatch(r"[A-Za-z\[\];',./`\s-]+", stripped):
+        converted = stripped.lower().translate(_EN_TO_RU_LAYOUT)
+        known_roots = (
+            "ноут", "принтер", "монитор", "клавиат", "мыш", "шин", "резин",
+            "куртк", "кроссов", "ботин", "футбол", "картридж", "роутер",
+        )
+        if any(root in converted for root in known_roots):
+            return converted
     return text
 
 
@@ -148,6 +184,12 @@ def correct_query(query: str) -> Tuple[str, bool]:
       3. Нечёткое сравнение через rapidfuzz (Левенштейн, порог 82%)
     """
     normalized = _normalize(query)
+
+    tire_pattern = re.compile(r"\b(\d{3})[/\\](\d{2})\s*[rRрР](\d{2})\b")
+    if tire_pattern.search(normalized):
+        normalized = tire_pattern.sub(r"\1/\2 r\3", normalized)
+        if "шин" not in normalized and "резин" not in normalized:
+            normalized = "шины " + normalized
 
     # 1. Прямая проверка словаря
     if normalized in TYPO_MAP:
@@ -217,6 +259,13 @@ def expand_synonyms(query: str) -> list[str]:
         for syn in SYNONYM_MAP[normalized][:2]:
             variants.add(syn)
 
+    # Если канонический термин встречается внутри длинного запроса,
+    # добавляем вариант с заменой термина на несколько синонимов.
+    for canonical, syns in SYNONYM_MAP.items():
+        if canonical in normalized:
+            for syn in syns[:2]:
+                variants.add(normalized.replace(canonical, syn))
+
     # Лемматизированный вариант
     lemmatized = lemmatize_query(normalized)
     if lemmatized != normalized:
@@ -226,6 +275,30 @@ def expand_synonyms(query: str) -> list[str]:
             variants.add(canonical2)
 
     return list(variants)[:4]
+
+
+def used_synonyms(query: str) -> dict[str, list[str]]:
+    """Возвращает синонимы, которые реально применимы к запросу."""
+    normalized = _normalize(query)
+    used: dict[str, list[str]] = {}
+    for canonical, syns in SYNONYM_MAP.items():
+        if canonical in normalized:
+            used[canonical] = syns[:4]
+    canonical = _REVERSE.get(normalized)
+    if canonical:
+        used[canonical] = SYNONYM_MAP.get(canonical, [])[:4]
+    return used
+
+
+def _detect_category(query: str) -> str:
+    q = query.lower()
+    if any(w in q for w in ["шин", "резин", "покрышк", " r1", " r2", "/"]):
+        return "tires"
+    if any(w in q for w in ["ноутбук", "принтер", "монитор", "мфу", "клавиатур", "сканер", "проектор", "роутер", "картридж"]):
+        return "office_tech"
+    if any(w in q for w in ["куртк", "пальто", "брюки", "платье", "кроссовк", "ботинк", "рубашк", "свитер", "джинс", "футболк"]):
+        return "clothing"
+    return "general"
 
 
 def process_query(raw_query: str) -> dict:
@@ -247,5 +320,8 @@ def process_query(raw_query: str) -> dict:
         "corrected": corrected,
         "was_corrected": was_corrected,
         "search_variants": variants,
+        "used_synonyms": used_synonyms(corrected),
+        "expanded_queries": variants,
         "primary_query": corrected,
+        "category": _detect_category(corrected),
     }

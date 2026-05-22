@@ -42,6 +42,21 @@
   color: var(--text-muted);
 }
 
+.statusBadge {
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  padding: 3px 8px;
+  color: #ffcc66;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.warning {
+  flex-basis: 100%;
+  color: #ffcc66;
+  font-size: 12px;
+}
+
 .priceRange {
   font-size: 14px;
   color: var(--text-secondary);

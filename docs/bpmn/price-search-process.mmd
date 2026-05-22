@@ -1,0 +1,46 @@
+flowchart TD
+    A([Пользователь открывает веб-интерфейс]) --> B
+
+    B["Ввод наименования товара и региона\nReact SearchBar\nПример: шины 205/55 R16, Санкт-Петербург"]
+    B --> C["POST /api/search\nFastAPI backend"]
+    C --> D["NLP-обработка запроса\nnlp/query_processor.py"]
+    D --> D1["Нормализация строки: lower + trim"]
+    D1 --> D2["Нормализация шин\n205/55r16 → шины 205/55 R16"]
+    D2 --> D3["Исправление опечаток\nrapidfuzz Левенштейн порог 82%"]
+    D3 --> D4["Лемматизация\npymorphy3 офлайн, 15MB"]
+    D4 --> D5["Расширение синонимами\nSYNONYM_MAP"]
+    D5 --> D6{Запрос исправлен?}
+    D6 -->|Да| D7["CorrectionBanner на UI"]
+    D6 -->|Нет| E
+    D7 --> E
+    E["Определение категории\ntires / office_tech / clothing / general"]
+    E --> F["Проверка TTL-кэша\nin-memory dict, 20 мин"]
+    F -->|HIT| Z
+    F -->|MISS| G
+    G["asyncio.gather — 4 парсера параллельно"]
+    G --> G1["WildberriesParser\nPlaywright → wildberries.ru/catalog/0/search.aspx\nDOM карточки + embedded JSON\nРегион через Cookie dest"]
+    G --> G2["OzonParser\nPlaywright → ozon.ru/search/\nJSON-LD + DOM tileGrid\nэлементы после JS-рендеринга"]
+    G --> G3["YandexMarketParser\nPlaywright → market.yandex.ru/search\n__NEXT_DATA__ JSON + DOM article\nРегион через lr + Cookie"]
+    G --> G4["RunetParser — 4й нефиксированный источник"]
+    G4 --> G4a["Шаг 1: SQLite FTS5 индекс\nпоиск по накопленным страницам"]
+    G4a --> G4b["Шаг 2: Playwright Crawler\nзагрузка seed-страниц с JS-рендерингом\nобнаружение товарных ссылок"]
+    G4b --> G4c["httpx: обход товарных страниц\nExtractor: JSON-LD → microdata → OG → heuristics"]
+    G4c --> G4d["Индексирование в SQLite FTS5\nдля будущих запросов"]
+    G1 & G2 & G3 & G4d --> H["asyncio.gather complete"]
+    H --> I["Дедупликация\nпо URL и normalize(title)+price+source"]
+    I --> J["Лексическое ранжирование\ntoken overlap + quality score\nсобственная реализация без ML-зависимостей"]
+    J --> K["Группировка по источникам\nprice_min / price_max / price_avg"]
+    K --> L["Запись в TTL-кэш"]
+    L --> Z["JSON SearchResponse"]
+    Z --> M["React Frontend Nginx :3000"]
+    M --> M1["CorrectionBanner — исправление и синонимы"]
+    M --> M2["StatsBar — цены и кол-во по источникам"]
+    M --> M3["SourceSection × 4 — карточки по группам"]
+    M3 --> M4["ProductCard: фото + название + характеристики\nцена + relevance_score + ссылка"]
+    M4 --> N([Пользователь переходит к первоисточнику])
+
+    style A fill:#4CAF50,color:#fff
+    style N fill:#4CAF50,color:#fff
+    style Z fill:#2196F3,color:#fff
+    style G fill:#FF9800,color:#fff
+    style H fill:#FF9800,color:#fff

@@ -40,9 +40,11 @@ export default function StatsBar({ results, activeSource, onSourceChange }) {
               <span className={styles.tabDot} style={{ background: meta.color }} />
               <span className={styles.tabName}>{r.source}</span>
               <span className={styles.tabCount}>{r.total_found}</span>
+              {r.status && <span className={`${styles.tabStatus} ${styles[`status_${r.status}`] || ''}`}>{r.status}</span>}
               {r.price_min && (
                 <span className={styles.tabPrice}>от {fmtPrice(r.price_min)}</span>
               )}
+              {r.price_avg && <span className={styles.tabAvg}>ср. {fmtPrice(r.price_avg)}</span>}
             </button>
           )
         })}

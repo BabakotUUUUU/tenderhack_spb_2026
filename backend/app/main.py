@@ -1,8 +1,9 @@
 """
-TenderHack — Сервис поиска цен в открытых источниках
-Главный модуль FastAPI
+TenderHack SPB 2026 — Сервис поиска цен в открытых источниках.
+Главный модуль FastAPI с lifespan (startup / shutdown).
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -18,15 +19,39 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Прогрев ML-модели при старте — чтобы первый запрос был быстрым
-    import asyncio
-    loop = asyncio.get_event_loop()
+    # ── Инициализация SQLite-индекса для Рунет-краулера ──────────────────
     try:
-        from app.ml.ranker import warmup
-        await loop.run_in_executor(None, warmup)
+        from app.search_index.db import init_db, DB_PATH
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, init_db, DB_PATH)
+        logger.info(f"[Main] Runet index ready at {DB_PATH}")
     except Exception as exc:
-        logger.warning(f"ML warmup skipped: {exc}")
+        logger.warning(f"[Main] Index init failed: {exc}")
+
+    # ── Фоновая индексация (non-blocking task) ────────────────────────────
+    bg_task = None
+    try:
+        from app.crawler.background import background_indexer_loop
+        bg_task = asyncio.create_task(background_indexer_loop())
+        logger.info("[Main] Background indexer started")
+    except Exception as exc:
+        logger.warning(f"[Main] Background indexer not started: {exc}")
+
     yield
+
+    # ── Graceful shutdown ─────────────────────────────────────────────────
+    if bg_task and not bg_task.done():
+        bg_task.cancel()
+        try:
+            await bg_task
+        except asyncio.CancelledError:
+            pass
+
+    try:
+        from app.parsers.browser import close_browser
+        await close_browser()
+    except Exception:
+        pass
 
 
 app = FastAPI(

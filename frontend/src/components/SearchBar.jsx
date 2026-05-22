@@ -1,21 +1,46 @@
-import { useState, useRef } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import styles from './SearchBar.module.css'
+import { fetchSuggest } from '../utils/api.js'
 
 const REGIONS = [
   'Москва', 'Санкт-Петербург', 'Новосибирск',
   'Екатеринбург', 'Казань', 'Нижний Новгород', 'Краснодар',
+  'Ростов-на-Дону', 'Уфа', 'Самара', 'Омск',
 ]
 
 export default function SearchBar({ onSearch, loading }) {
   const [query, setQuery] = useState('')
   const [region, setRegion] = useState('Москва')
   const [focused, setFocused] = useState(false)
+  const [suggestions, setSuggestions] = useState([])
   const inputRef = useRef(null)
+
+  useEffect(() => {
+    if (query.trim().length < 2) {
+      setSuggestions([])
+      return undefined
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const data = await fetchSuggest(query.trim())
+        setSuggestions(data)
+      } catch {
+        setSuggestions([])
+      }
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [query])
 
   const handleSubmit = (e) => {
     e.preventDefault()
     if (!query.trim() || loading) return
     onSearch({ query: query.trim(), region })
+  }
+
+  const submitSuggestion = (value) => {
+    setQuery(value)
+    setSuggestions([])
+    onSearch({ query: value, region })
   }
 
   return (
@@ -39,6 +64,18 @@ export default function SearchBar({ onSearch, loading }) {
           disabled={loading}
           autoComplete="off"
         />
+
+        {focused && suggestions.length > 0 && (
+          <ul className={styles.suggestions}>
+            {suggestions.map(item => (
+              <li key={item}>
+                <button type="button" onMouseDown={() => submitSuggestion(item)}>
+                  {item}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
 
         <div className={styles.divider} />
 
@@ -78,6 +115,18 @@ export default function SearchBar({ onSearch, loading }) {
             </>
           )}
         </button>
+      </div>
+      <div className={styles.examples}>
+        {['шины 205/55 R16', 'ноутбук lenovo', 'куртка зимняя мужская'].map(example => (
+          <button
+            key={example}
+            type="button"
+            disabled={loading}
+            onClick={() => submitSuggestion(example)}
+          >
+            {example}
+          </button>
+        ))}
       </div>
     </form>
   )

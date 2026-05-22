@@ -68,3 +68,30 @@
   font-size: 12px;
   color: var(--text-muted);
 }
+
+.tabAvg {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.tabStatus {
+  border-radius: 100px;
+  padding: 1px 7px;
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.status_success {
+  color: #00e5b0;
+}
+
+.status_partial {
+  color: #ffcc66;
+}
+
+.status_failed,
+.status_timeout {
+  color: #ff6b6b;
+}

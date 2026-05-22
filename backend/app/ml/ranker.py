@@ -1,113 +1,240 @@
 """
-Семантический ре-ранкер результатов поиска.
+Собственный лексический ранкер результатов поиска.
 
-Технология: fastembed (ONNX Runtime) — без PyTorch, без GPU.
-Модель: paraphrase-multilingual-MiniLM-L12-v2
-  - Размер: ~120 MB (ONNX формат)
-  - Поддержка: 50+ языков включая русский
-  - Инференс: ~30–80 мс на батч из 20 товаров (CPU)
-  - RAM: ~300 MB при загрузке
+Подход: лёгкий scoring без нейросетей и внешних зависимостей.
+Соответствует требованию хакатона «предпочтение лёгким решениям».
 
-Почему fastembed, а не sentence-transformers напрямую:
-  sentence-transformers тянет PyTorch (~700 MB) — нарушает требование
-  хакатона о лёгких решениях. fastembed использует тот же ONNX-экспорт
-  модели, но через onnxruntime (~50 MB). Итог: те же качество, в 14×
-  меньше зависимостей.
+Алгоритм (собственная реализация):
+  1. Токенизация запроса и заголовка товара (unicode split)
+  2. Точное совпадение токенов — основной сигнал релевантности
+  3. Штрафы/бонусы за качество карточки (цена, фото, характеристики)
+  4. Нормализация названия для entity matching (HP M111w = hp m111w)
+  5. Дедупликация по нормализованному URL и нормализованному title+price
 
-Алгоритм ранжирования:
-  1. Кодируем запрос → вектор 384d
-  2. Кодируем заголовок каждого товара → вектор 384d
-  3. Косинусное сходство(query_vec, title_vec) → score 0..1
-  4. Сортируем по убыванию score
-  5. Записываем score в поле relevance_score каждого ProductItem
+Веса подобраны эмпирически для товарного поиска.
 """
 
 import logging
+import re
 from dataclasses import replace
 from typing import Optional
-
-import numpy as np
 
 from app.parsers.base import ProductItem
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+# ---------------------------------------------------------------------------
+# Токенизация и нормализация
+# ---------------------------------------------------------------------------
 
-_model = None
-_model_attempted = False
+_NON_WORD = re.compile(r"[^\w\s]")
+_SPACES   = re.compile(r"\s+")
 
 
-def _load_model():
-    global _model, _model_attempted
-    if _model_attempted:
-        return _model
-    _model_attempted = True
-    try:
-        from fastembed import TextEmbedding
-        _model = TextEmbedding(
-            model_name=MODEL_NAME,
-            max_length=128,  # заголовки товаров короткие — 128 токенов хватает
+def _normalize_title(title: str) -> str:
+    """
+    Нормализует название для entity matching и дедупликации.
+    HP LaserJet M111w  →  hp laserjet m111w
+    Canon PIXMA G3420  →  canon pixma g3420
+    """
+    t = title.lower()
+    t = _NON_WORD.sub(" ", t)
+    t = _SPACES.sub(" ", t).strip()
+    return t
+
+
+def _tokens(text: str) -> set[str]:
+    """Разбивает текст на токены длиной > 2 символов."""
+    return {t for t in re.findall(r"[a-zа-яё\d]+", text.lower()) if len(t) > 2}
+
+
+def _item_text(item: ProductItem) -> str:
+    """Собирает поисковый текст из заголовка и первых характеристик."""
+    parts = [item.title or ""]
+    if item.characteristics:
+        chars_str = " ".join(
+            f"{k} {v}" for k, v in list(item.characteristics.items())[:3]
         )
-        logger.info(f"[Ranker] Loaded: {MODEL_NAME}")
-    except ImportError:
-        logger.warning("[Ranker] fastembed не установлен — ранжирование отключено")
-    except Exception as exc:
-        logger.error(f"[Ranker] Ошибка загрузки модели: {exc}")
-    return _model
+        parts.append(chars_str)
+    return " ".join(parts)[:256]
 
 
-def _cosine(a: np.ndarray, b: np.ndarray) -> float:
-    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
-    return float(np.dot(a, b) / denom) if denom > 1e-9 else 0.0
+# ---------------------------------------------------------------------------
+# Качество карточки
+# ---------------------------------------------------------------------------
 
+def _quality_score(item: ProductItem) -> float:
+    """
+    Бонус/штраф за полноту карточки товара.
+    Диапазон: примерно -0.25 … +0.25
+    """
+    score = 0.0
+    # Цена — ключевой атрибут
+    if item.price and item.price > 0:
+        score += 0.12
+    else:
+        score -= 0.10
+    # Изображение
+    if item.image_url:
+        score += 0.05
+    else:
+        score -= 0.05
+    # Характеристики
+    if item.characteristics:
+        score += min(len(item.characteristics), 5) * 0.02
+    # Короткий/мусорный заголовок
+    title_len = len((item.title or "").strip())
+    if title_len < 8:
+        score -= 0.20
+    elif title_len > 20:
+        score += 0.03
+    return score
+
+
+# ---------------------------------------------------------------------------
+# Лексический scoring (собственная реализация)
+# ---------------------------------------------------------------------------
+
+def _lexical_score(query: str, item: ProductItem) -> float:
+    """
+    Оценивает релевантность товара запросу по точному совпадению токенов.
+
+    Формула:
+      base = |tokens(query) ∩ tokens(item)| / |tokens(query)|
+      score = base * 0.75 + quality_score(item)
+
+    Результат зажат в [0, 1].
+    """
+    query_tokens = _tokens(query)
+    item_tokens  = _tokens(_item_text(item))
+
+    if not query_tokens:
+        base = 0.0
+    else:
+        overlap = len(query_tokens & item_tokens)
+        base = overlap / len(query_tokens)
+
+    raw = base * 0.75 + _quality_score(item)
+    return max(0.0, min(1.0, raw))
+
+
+def _explain(query: str, item: ProductItem, score: float) -> str:
+    """Человекочитаемое объяснение score для отладки."""
+    hits = _tokens(query) & _tokens(_item_text(item))
+    parts: list[str] = []
+    if hits:
+        parts.append("слова: " + ", ".join(sorted(hits)[:5]))
+    if item.price:
+        parts.append("есть цена")
+    if item.image_url:
+        parts.append("есть фото")
+    if item.characteristics:
+        parts.append(f"характеристики ({len(item.characteristics)})")
+    return "; ".join(parts) or f"score={score:.2f}"
+
+
+# ---------------------------------------------------------------------------
+# Дедупликация и фильтрация мусора
+# ---------------------------------------------------------------------------
+
+def _dedupe_and_filter(items: list[ProductItem]) -> list[ProductItem]:
+    """
+    Удаляет дубликаты и очевидный мусор.
+
+    Дедупликация:
+      1. По нормализованному URL (без query string)
+      2. По нормализованному title + price + source
+
+    Фильтрация:
+      - Нет заголовка или URL
+      - Слишком короткий заголовок (< 4 символов)
+      - URL похож на страницу категории/поиска, не карточку товара
+    """
+    seen_urls: set[str] = set()
+    seen_keys: set[tuple[str, Optional[int], str]] = set()
+    result: list[ProductItem] = []
+
+    for item in items:
+        title = (item.title or "").strip()
+        url   = (item.product_url or "").strip()
+
+        # Фильтр мусора
+        if not title or not url or len(title) < 4:
+            continue
+
+        url_lower = url.lower().split("?")[0].rstrip("/")
+
+        # Фильтр страниц-категорий (не карточек)
+        is_category = (
+            any(m in url_lower for m in ("/catalog/?", "/category/", "/search?", "/search/"))
+            and not any(
+                m in url_lower
+                for m in (
+                    "wildberries.ru/catalog/",
+                    "ozon.ru/product",
+                    "market.yandex.ru/product",
+                )
+            )
+        )
+        if is_category:
+            continue
+
+        # Дедуп по URL
+        if url_lower in seen_urls:
+            continue
+        seen_urls.add(url_lower)
+
+        # Дедуп по нормализованному title + price (entity matching)
+        norm_title = _normalize_title(title)[:100]
+        price_key  = int(item.price) if item.price else None
+        key        = (norm_title, price_key, item.source)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+
+        result.append(item)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Публичный API
+# ---------------------------------------------------------------------------
 
 def rank_items(query: str, items: list[ProductItem]) -> list[ProductItem]:
     """
-    Сортирует товары по семантической близости заголовка к запросу.
+    Сортирует товары по релевантности к запросу (лексический подход).
 
-    Если модель не загружена (fastembed недоступен) — возвращает
-    исходный список без изменений, приложение продолжает работу.
+    Шаги:
+      1. Дедупликация и фильтрация мусора
+      2. Лексический scoring (токенное пересечение + качество карточки)
+      3. Сортировка по убыванию score
+      4. Запись score и объяснения в поля ProductItem
     """
     if not items or not query.strip():
         return items
 
-    model = _load_model()
-    if model is None:
-        return items
+    items = _dedupe_and_filter(items)
+    if not items:
+        return []
 
-    try:
-        texts = [query] + [item.title for item in items]
-        embeddings = list(model.embed(texts))
+    scored: list[tuple[ProductItem, float]] = []
+    for item in items:
+        score = round(_lexical_score(query, item), 4)
+        scored.append((item, score))
 
-        query_vec = np.array(embeddings[0], dtype=np.float32)
-        item_vecs = [np.array(e, dtype=np.float32) for e in embeddings[1:]]
+    scored.sort(key=lambda x: x[1], reverse=True)
 
-        scored: list[tuple[ProductItem, float]] = [
-            (item, _cosine(query_vec, vec))
-            for item, vec in zip(items, item_vecs)
-        ]
-        scored.sort(key=lambda x: x[1], reverse=True)
-
-        return [
-            replace(item, relevance_score=round(score, 4))
-            for item, score in scored
-        ]
-
-    except Exception as exc:
-        logger.warning(f"[Ranker] Ошибка ранжирования: {exc}")
-        return items
+    return [
+        replace(
+            item,
+            relevance_score=score,
+            relevance_explanation=_explain(query, item, score),
+        )
+        for item, score in scored
+    ]
 
 
 def warmup() -> None:
-    """
-    Прогрев модели при старте приложения.
-    Вызывать из lifespan FastAPI, чтобы первый запрос был быстрым.
-    """
-    model = _load_model()
-    if model is not None:
-        try:
-            list(model.embed(["прогрев модели"]))
-            logger.info("[Ranker] Warmup done")
-        except Exception:
-            pass
+    """Stub для совместимости — лексический ранкер не требует прогрева."""
+    logger.info("[Ranker] Lexical ranker ready (no warmup needed)")
