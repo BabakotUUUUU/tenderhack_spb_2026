@@ -14,6 +14,7 @@ from app.parsers.yandex_market import YandexMarketParser
 from app.parsers.runet import RunetParser
 from app.parsers.base import ProductItem
 from app.nlp.query_processor import process_query
+from app.ml.ranker import rank_items
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ def _product_to_dict(p: ProductItem) -> dict:
         "characteristics": p.characteristics,
         "rating": p.rating,
         "reviews_count": p.reviews_count,
+        "relevance_score": p.relevance_score,
     }
 
 
@@ -64,19 +66,24 @@ def _build_source_result(source_name: str, items: list[ProductItem]) -> SearchRe
     )
 
 
+def _safe(result, fallback: list) -> list:
+    if isinstance(result, Exception):
+        logger.error(f"Parser error: {result}")
+        return fallback
+    return result or fallback
+
+
 @router.get("/search", response_model=SearchResponse)
 async def search(
     q: str = Query(..., min_length=2, description="Поисковый запрос"),
     region: str = Query("Москва", description="Регион пользователя"),
     limit: int = Query(10, ge=1, le=30, description="Количество результатов на источник"),
 ):
-    # Обрабатываем запрос через NLP
-    nlp_result = process_query(q)
-    primary = nlp_result["primary_query"]
-
+    nlp = process_query(q)
+    primary = nlp["primary_query"]
     logger.info(f"Search: '{q}' -> '{primary}', region={region}")
 
-    # Параллельный запуск всех парсеров
+    # Параллельный запуск всех 4 парсеров
     async def run_wb():
         async with WildberriesParser() as p:
             return await p.search(primary, region, limit)
@@ -93,32 +100,39 @@ async def search(
         async with RunetParser() as p:
             return await p.search(primary, region, min(limit, 8))
 
-    wb_items, ozon_items, ym_items, runet_items = await asyncio.gather(
+    wb_raw, ozon_raw, ym_raw, runet_raw = await asyncio.gather(
         run_wb(), run_ozon(), run_ym(), run_runet(),
         return_exceptions=True,
     )
 
-    # Обрабатываем исключения
-    def safe(result, fallback=[]):
-        if isinstance(result, Exception):
-            logger.error(f"Parser error: {result}")
-            return fallback
-        return result or fallback
+    wb_items    = _safe(wb_raw, [])
+    ozon_items  = _safe(ozon_raw, [])
+    ym_items    = _safe(ym_raw, [])
+    runet_items = _safe(runet_raw, [])
+
+    # ML ре-ранкинг: сортируем каждый источник по семантической близости к запросу.
+    # rank_items — graceful degradation: если fastembed недоступен, возвращает
+    # исходный список без изменений.
+    ranked_ym     = await asyncio.get_event_loop().run_in_executor(None, rank_items, primary, ym_items)
+    ranked_ozon   = await asyncio.get_event_loop().run_in_executor(None, rank_items, primary, ozon_items)
+    ranked_wb     = await asyncio.get_event_loop().run_in_executor(None, rank_items, primary, wb_items)
+    ranked_runet  = await asyncio.get_event_loop().run_in_executor(None, rank_items, primary, runet_items)
 
     results = [
-        _build_source_result("Яндекс Маркет", safe(ym_items)),
-        _build_source_result("Ozon", safe(ozon_items)),
-        _build_source_result("Wildberries", safe(wb_items)),
-        _build_source_result("Интернет (Рунет)", safe(runet_items)),
+        _build_source_result("Яндекс Маркет",    ranked_ym),
+        _build_source_result("Ozon",              ranked_ozon),
+        _build_source_result("Wildberries",       ranked_wb),
+        _build_source_result("Интернет (Рунет)", ranked_runet),
     ]
 
     total = sum(r.total_found for r in results)
+    logger.info(f"Search done: {total} items total")
 
     return SearchResponse(
         original_query=q,
-        corrected_query=nlp_result["corrected"] if nlp_result["was_corrected"] else None,
-        was_corrected=nlp_result["was_corrected"],
-        search_variants=nlp_result["search_variants"],
+        corrected_query=nlp["corrected"] if nlp["was_corrected"] else None,
+        was_corrected=nlp["was_corrected"],
+        search_variants=nlp["search_variants"],
         region=region,
         results=results,
         total_items=total,

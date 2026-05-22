@@ -47,6 +47,7 @@ class ProductItem:
     characteristics: dict = field(default_factory=dict)
     rating: Optional[float] = None
     reviews_count: Optional[int] = None
+    relevance_score: Optional[float] = None  # заполняется ML-ранкером
 
 
 class RateLimiter:
