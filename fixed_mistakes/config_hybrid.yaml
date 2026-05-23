@@ -1,0 +1,62 @@
+# Гибридная конфигурация: PriceHunt NLP + BART Spell Checker
+
+models:
+  primary:
+    name: "facebook/bart-base"
+    use_gpu: true
+    max_length: 128
+    num_beams: 5
+    temperature: 1.0
+  fast:
+    name: "facebook/bart-base"
+    use_gpu: false
+    max_length: 64
+    num_beams: 3
+    temperature: 1.0
+
+fallback:
+  enabled: true
+  dictionary_path: "data/hybrid_dict.txt"
+  auto_update: true
+  max_levenshtein_distance: 5
+  hot_reload_interval: 300
+
+pricehunt:
+  rapidfuzz_threshold: 82
+  max_variants: 4
+  enable_tire_pattern: true
+  enable_keyboard_layout_fix: true
+
+bart:
+  mask_token: "<mask>"
+  corruption:
+    text_infilling: true
+    sentence_permutation: true
+    token_deletion: true
+    document_rotation: false
+  synthetic_noise_prob: 0.3
+
+keyboard:
+  weight_adjacent: 1.0
+  weight_same_row: 1.5
+  weight_other: 3.0
+
+phonetic:
+  enabled: true
+  algorithm: "combined"
+
+cache:
+  maxsize: 4096
+  ttl: 3600
+
+logging:
+  level: "INFO"
+  file: "logs/hybrid_corrections.log"
+  metrics_enabled: true
+  metrics_file: "logs/hybrid_metrics.jsonl"
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+  max_batch_size: 32

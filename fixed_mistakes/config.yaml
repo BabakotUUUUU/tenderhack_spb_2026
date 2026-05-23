@@ -1,0 +1,56 @@
+# Конфигурация исправления опечаток
+
+# Модели
+models:
+  primary:
+    name: "ai-forever/FRED-T5-1.7B-spell-distilled-100m"
+    use_gpu: true
+    max_length: 128
+    num_beams: 5
+    temperature: 1.0
+  fast:
+    name: "cointegrated/rubert-tiny2"
+    use_gpu: false
+    max_length: 64
+    num_beams: 3
+    temperature: 1.0
+
+# Словарный fallback
+fallback:
+  enabled: true
+  dictionary_path: "data/common_words.txt"
+  auto_update: true
+  max_levenshtein_distance: 5
+  hot_reload_interval: 300  # секунды
+
+# Клавиатурные веса
+keyboard:
+  layout: "ru_standard"
+  weight_adjacent: 1.0
+  weight_same_row: 1.5
+  weight_same_hand: 2.0
+  weight_other: 3.0
+
+# Фонетика
+phonetic:
+  enabled: true
+  algorithm: "combined"  # soundex_ru / metaphone_ru / combined
+
+# Кэширование
+cache:
+  maxsize: 4096
+  ttl: 3600
+
+# Логирование
+logging:
+  level: "INFO"
+  file: "logs/spell_corrections.log"
+  metrics_enabled: true
+  metrics_file: "logs/metrics.jsonl"
+
+# API
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+  max_batch_size: 32

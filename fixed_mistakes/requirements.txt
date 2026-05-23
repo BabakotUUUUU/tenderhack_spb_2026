@@ -1,0 +1,27 @@
+# Основные зависимости
+torch>=2.0.0
+transformers>=4.30.0
+sentencepiece>=0.1.99
+accelerate>=0.20.0
+
+# NLP и фонетика
+pymorphy3>=1.2.0
+pymorphy3-dicts-ru
+
+# API и async
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+httpx>=0.24.0
+
+# Утилиты
+pyyaml>=6.0
+python-Levenshtein>=0.21.0
+nltk>=3.8.0
+
+# Тестирование
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-benchmark>=4.0.0
+
+# Логирование и мониторинг
+structlog>=23.0.0
