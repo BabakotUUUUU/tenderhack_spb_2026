@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import asdict
 from typing import Any, Optional
 
 from fastapi import APIRouter, Query

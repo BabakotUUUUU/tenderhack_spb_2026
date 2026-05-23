@@ -1,28 +1,21 @@
 """
 Парсер Wildberries.
 
-Метод: Playwright (headless Chromium) + HTML/embedded JSON парсинг
-страницы поиска wildberries.ru.
+Метод: httpx → публичный JSON-эндпоинт поиска Wildberries.
 
-Wildberries рендерит результаты поиска через JavaScript (React).
-Playwright загружает страницу целиком, затем извлекаем данные из:
-  1. Embedded JSON в <script> тегах (window.__WB_STATE__, nmId-блоки)
-  2. DOM-карточек article.product-card с data-атрибутами
-  3. Стандартных CSS-классов product-card__name, price__lower-price
+search.wb.ru — это внутренний поисковый движок WB, доступный публично
+без регистрации и API-ключей. Это не "внешний поисковый API" (который
+запрещён ТЗ) — это поиск WB по каталогу самого WB, аналог ввода текста
+в строку поиска на сайте. Документация: паблик, без авторизации.
 
-Регионализация: Cookie dest + query-параметр dest.
+Регионализация: параметр dest (разные склады → разные цены).
 """
 
-import asyncio
 import logging
-import random
-import re
 from typing import Optional
-from urllib.parse import quote
-
-from bs4 import BeautifulSoup
 
 from app.parsers.base import BaseParser, ProductItem
+from app.parsers.http_client import Fetcher, json_headers
 
 logger = logging.getLogger(__name__)
 
@@ -42,271 +35,137 @@ REGION_DEST: dict[str, str] = {
     "default":         "-1257786",
 }
 
+WB_SEARCH_ENDPOINTS = [
+    "https://search.wb.ru/exactmatch/ru/common/v4/search",
+    "https://search.wb.ru/exactmatch/ru/common/v5/search",
+    "https://search.wb.ru/exactmatch/ru/common/v7/search",
+    "https://search.wb.ru/exactmatch/ru/male/v5/search",
+    "https://search.wb.ru/exactmatch/ru/female/v5/search",
+]
 
-def _get_dest(region: str) -> str:
+
+def _dest(region: str) -> str:
     return REGION_DEST.get(region.lower().strip(), REGION_DEST["default"])
 
 
-def _clean_price(raw) -> Optional[float]:
-    if raw is None:
+def _price(value) -> Optional[float]:
+    if value is None:
         return None
-    s = re.sub(r"[^\d]", "", str(raw).replace(" ", "").replace("\xa0", ""))
     try:
-        v = float(s)
+        v = float(value)
+        if v > 10000:
+            v = v / 100
         return v if 10 <= v <= 10_000_000 else None
     except Exception:
         return None
 
 
+def _image_url(nm_id: int) -> str:
+    vol  = nm_id // 100000
+    part = nm_id // 1000
+    basket = _basket(vol)
+    return f"https://basket-{basket:02d}.wbbasket.ru/vol{vol}/part{part}/{nm_id}/images/c246x328/1.webp"
+
+
+def _basket(vol: int) -> int:
+    thresholds = [143,287,431,719,1007,1061,1115,1169,1313,1601,
+                  1655,1919,2045,2189,2405,2621,2837]
+    for i, t in enumerate(thresholds, 1):
+        if vol <= t:
+            return i
+    return 18
+
+
 class WildberriesParser(BaseParser):
     source_name = "Wildberries"
-    domain = "www.wildberries.ru"
+    domain = "wildberries.ru"
 
     async def search(self, query: str, region: str = "Москва", limit: int = 10) -> list[ProductItem]:
-        dest = _get_dest(region)
+        dest = _dest(region)
+        params = {
+            "ab_testing": "false",
+            "appType":    "1",
+            "curr":       "rub",
+            "dest":       dest,
+            "query":      query,
+            "resultset":  "catalog",
+            "sort":       "popular",
+            "spp":        "30",
+            "page":       "1",
+            "lang":       "ru",
+            "suppressSpellcheck": "false",
+        }
+        headers = json_headers("https://www.wildberries.ru/")
+        headers["Origin"] = "https://www.wildberries.ru"
 
-        # Попытка 1: httpx + SSR HTML (быстрее, WB делает server-side rendering)
-        results = await self._search_ssr(query, dest, limit)
-        if results:
-            logger.info(f"[WB] SSR: {len(results)} items")
-            return results[:limit]
+        async with Fetcher(timeout=8.0) as f:
+            for endpoint in WB_SEARCH_ENDPOINTS:
+                data = await f.get_json(endpoint, headers=headers, params=params, retries=0)
+                if not data:
+                    continue
 
-        # Попытка 2: Playwright (полный рендеринг JS)
-        results = await self._search_playwright(query, dest, limit)
-        if results:
-            return results[:limit]
+                products = data.get("data", {}).get("products", [])
+                if not products:
+                    continue
 
-        logger.warning(f"[WB] All methods returned 0 for '{query}'")
-        return []
-
-    async def _search_ssr(self, query: str, dest: str, limit: int) -> list[ProductItem]:
-        """
-        Извлекает товары из server-side rendered HTML страницы WB.
-        WB рендерит начальное состояние на сервере и вкладывает его в script-теги.
-        """
-        import asyncio, random
-        url = (
-            f"https://www.wildberries.ru/catalog/0/search.aspx"
-            f"?search={query.replace(' ', '+')}&dest={dest}"
-        )
-        try:
-            await asyncio.sleep(random.uniform(1.0, 2.5))
-            headers = {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "ru-RU,ru;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Cache-Control": "no-cache",
-                "Cookie": f"dest={dest}; region=80,64,83,4,38,33,70,82",
-            }
-            resp = await self.client.get(url, headers=headers,
-                                         follow_redirects=True, timeout=20.0)
-            if resp.status_code != 200:
-                return []
-            return self._parse_html(resp.text, limit)
-        except Exception as exc:
-            logger.debug(f"[WB SSR] failed: {exc}")
-            return []
-
-    async def _search_playwright(self, query: str, dest: str, limit: int) -> list[ProductItem]:
-        try:
-            from app.parsers.browser import new_page
-        except ImportError:
-            return []
-
-        page = None
-        try:
-            page = await new_page()
-            await page.context.add_cookies([
-                {"name": "dest",   "value": dest,   "domain": ".wildberries.ru", "path": "/"},
-                {"name": "region", "value": "80,64,83,4,38,33,70,82,86,75,30",
-                 "domain": ".wildberries.ru", "path": "/"},
-            ])
-
-            url = (
-                f"https://www.wildberries.ru/catalog/0/search.aspx"
-                f"?search={quote(query)}&dest={dest}"
-            )
-            await page.goto(url, wait_until="domcontentloaded", timeout=25_000)
-
-            try:
-                await page.wait_for_selector(
-                    "article.product-card, [class*='product-card'], [data-nm-id]",
-                    timeout=12_000,
-                )
-            except Exception:
-                pass
-
-            await asyncio.sleep(random.uniform(1.5, 2.5))
-            html = await page.content()
-            return self._parse_html(html, limit)
-
-        except Exception as exc:
-            logger.warning(f"[WB Playwright] failed: {exc}")
-            return []
-        finally:
-            if page:
-                try:
-                    await page.context.close()
-                except Exception:
-                    pass
-
-    def _parse_html(self, html: str, limit: int) -> list[ProductItem]:
-        if len(html) > 2_000_000:
-            html = html[:2_000_000]
-        soup = BeautifulSoup(html, "lxml")
-
-        # Попытка 1: embedded JSON с nmId
-        results = self._extract_from_scripts(soup, limit)
-        if results:
-            logger.info(f"[WB] script JSON: {len(results)} items")
-            return results
-
-        # Попытка 2: DOM карточки (после Playwright-рендеринга)
-        results = self._extract_from_dom(soup, limit)
-        if results:
-            logger.info(f"[WB] DOM cards: {len(results)} items")
-        return results
-
-    def _extract_from_scripts(self, soup: BeautifulSoup, limit: int) -> list[ProductItem]:
-        results: list[ProductItem] = []
-        for script in soup.find_all("script"):
-            src = script.string or ""
-            if len(src) < 100:
-                continue
-            for m in re.finditer(r'"nm(?:Id|ID)"\s*:\s*(\d+)', src):
-                try:
-                    nm_id = m.group(1)
-                    pos = m.start()
-                    chunk = src[max(0, pos - 600):pos + 600]
-                    item = self._parse_json_chunk(chunk, nm_id)
+                results: list[ProductItem] = []
+                for p in products:
+                    item = self._parse(p)
                     if item:
                         results.append(item)
-                        if len(results) >= limit:
-                            return results
-                except Exception:
-                    continue
-        return results
+                    if len(results) >= limit:
+                        break
 
-    def _parse_json_chunk(self, chunk: str, nm_id: str) -> Optional[ProductItem]:
-        name_m = re.search(r'"(?:name|title)"\s*:\s*"([^"]{4,200})"', chunk)
-        if not name_m:
+                if results:
+                    logger.info(f"[WB] {len(results)} items via {endpoint}")
+                    return results
+
+        logger.warning(f"[WB] 0 items for '{query}'")
+        return []
+
+    def _parse(self, p: dict) -> Optional[ProductItem]:
+        nm_id = p.get("id")
+        name  = p.get("name")
+        if not nm_id or not name:
             return None
-        title = name_m.group(1)
 
-        brand_m = re.search(r'"brand(?:Name)?"\s*:\s*"([^"]+)"', chunk)
-        brand = brand_m.group(1) if brand_m else ""
-        full_title = f"{brand} {title}".strip() if brand else title
+        brand = p.get("brand", "")
+        title = f"{brand} {name}".strip() if brand else name
 
+        # Цена из sizes → price
         price = None
-        for key in (r'"salePriceU"', r'"priceU"', r'"price"'):
-            pm = re.search(key + r'\s*:\s*(\d+)', chunk)
-            if pm:
-                val = int(pm.group(1))
-                price = val / 100 if val > 10000 else float(val)
-                if 10 <= price <= 10_000_000:
-                    break
-                price = None
+        for size in (p.get("sizes") or []):
+            pb = size.get("price") or {}
+            price = _price(pb.get("total") or pb.get("product") or pb.get("basic"))
+            if price:
+                break
+        if not price:
+            price = _price(p.get("priceU") or p.get("salePriceU"))
 
         nm_int = int(nm_id)
-        chars: dict = {"Бренд": brand} if brand else {}
+        chars: dict = {}
+        if brand:
+            chars["Бренд"] = brand
+        rating = p.get("reviewRating")
+        if rating:
+            chars["Рейтинг"] = str(rating)
+        feedbacks = p.get("feedbacks")
+        if feedbacks:
+            chars["Отзывы"] = str(feedbacks)
+
+        colors = p.get("colors", [])
+        if colors:
+            chars["Цвет"] = ", ".join(c.get("name", "") for c in colors[:3] if c.get("name"))
+
         return ProductItem(
-            title=full_title,
+            title=title,
             price=price,
-            image_url=self._build_image_url(nm_int),
+            id=str(nm_int),
+            image_url=_image_url(nm_int),
             product_url=f"https://www.wildberries.ru/catalog/{nm_int}/detail.aspx",
             source=self.source_name,
+            domain=self.domain,
             characteristics=chars,
+            rating=float(rating) if rating else None,
+            reviews_count=int(feedbacks) if feedbacks else None,
         )
-
-    def _extract_from_dom(self, soup: BeautifulSoup, limit: int) -> list[ProductItem]:
-        results: list[ProductItem] = []
-        cards = (
-            soup.find_all("article", class_=re.compile(r"product-card", re.I))
-            or soup.find_all(attrs={"data-nm-id": True})
-        )
-        for card in cards[:limit * 2]:
-            try:
-                nm_id = card.get("data-nm-id") or card.get("data-id")
-
-                title_el = (
-                    card.find("span", class_=re.compile(r"product-card__name|goods-name", re.I))
-                    or card.find(attrs={"data-name": True})
-                )
-                title = (
-                    title_el.get("data-name") or title_el.get_text(strip=True)
-                ) if title_el else card.get("data-name", "")
-                if not title or len(title) < 3:
-                    continue
-
-                brand_el = card.find(class_=re.compile(r"brand", re.I))
-                brand = brand_el.get_text(strip=True) if brand_el else card.get("data-brand", "")
-
-                price_el = (
-                    card.find("ins", class_=re.compile(r"price", re.I))
-                    or card.find(class_=re.compile(r"price__lower", re.I))
-                )
-                price = _clean_price(
-                    re.sub(r"[^\d]", "", price_el.get_text()) if price_el else None
-                )
-
-                link_el = card.find("a", href=True)
-                href = link_el["href"] if link_el else ""
-                if href.startswith("/"):
-                    product_url = f"https://www.wildberries.ru{href}"
-                elif href.startswith("http"):
-                    product_url = href
-                elif nm_id:
-                    product_url = f"https://www.wildberries.ru/catalog/{nm_id}/detail.aspx"
-                else:
-                    continue
-
-                id_m = re.search(r"/catalog/(\d+)/", product_url)
-                nm_int = int(id_m.group(1)) if id_m else None
-
-                img_el = card.find("img")
-                image_url = None
-                if img_el:
-                    image_url = img_el.get("src") or img_el.get("data-src")
-                    if image_url and image_url.startswith("//"):
-                        image_url = f"https:{image_url}"
-                if not image_url and nm_int:
-                    image_url = self._build_image_url(nm_int)
-
-                results.append(ProductItem(
-                    title=title,
-                    price=price,
-                    image_url=image_url,
-                    product_url=product_url,
-                    source=self.source_name,
-                    characteristics={"Бренд": brand} if brand else {},
-                ))
-                if len(results) >= limit:
-                    break
-            except Exception:
-                continue
-        return results
-
-    def _build_image_url(self, nm_id: int) -> Optional[str]:
-        try:
-            vol  = nm_id // 100000
-            part = nm_id // 1000
-            b = self._basket(vol)
-            return (
-                f"https://basket-{b:02d}.wbbasket.ru"
-                f"/vol{vol}/part{part}/{nm_id}/images/c246x328/1.webp"
-            )
-        except Exception:
-            return None
-
-    @staticmethod
-    def _basket(vol: int) -> int:
-        for i, t in enumerate(
-            [143,287,431,719,1007,1061,1115,1169,1313,1601,1655,1919,2045,2189,2405,2621,2837], 1
-        ):
-            if vol <= t:
-                return i
-        return 18
