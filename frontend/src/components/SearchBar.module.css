@@ -1,6 +1,6 @@
 .form {
   width: 100%;
-  max-width: 820px;
+  max-width: 800px;
   margin: 0 auto;
 }
 
@@ -8,103 +8,52 @@
   position: relative;
   display: flex;
   align-items: center;
-  background: var(--bg-card);
-  border: 1.5px solid var(--border);
-  border-radius: var(--radius-xl);
-  padding: 6px 6px 6px 20px;
-  gap: 8px;
-  transition: border-color 0.2s, box-shadow 0.2s;
-  box-shadow: var(--shadow-card);
-}
-
-.suggestions {
-  position: absolute;
-  left: 48px;
-  right: 230px;
-  top: calc(100% + 8px);
-  z-index: 100;
-  margin: 0;
-  padding: 6px;
-  list-style: none;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: var(--shadow-card);
-}
-
-.suggestions button {
-  width: 100%;
-  border: 0;
-  background: transparent;
-  color: var(--text-primary);
-  padding: 10px 12px;
+  background: #fff;
+  border: 2px solid #0052CC;
   border-radius: 8px;
-  text-align: left;
-  cursor: pointer;
-  font: inherit;
+  overflow: visible;
+  box-shadow: 0 2px 8px rgba(0,82,204,0.15);
+  gap: 0;
 }
 
-.suggestions button:hover {
-  background: rgba(255, 255, 255, 0.06);
-}
-
-.examples {
-  display: flex;
-  justify-content: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 12px;
-}
-
-.examples button {
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-secondary);
-  border-radius: 999px;
-  padding: 7px 12px;
-  cursor: pointer;
-  font: inherit;
-  font-size: 13px;
-}
-
-.examples button:hover:not(:disabled) {
-  color: var(--text-primary);
-  border-color: var(--accent);
-}
 .wrapFocused {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 4px var(--accent-glow);
+  border-color: #003d99;
+  box-shadow: 0 2px 12px rgba(0,82,204,0.25);
 }
 
 .searchIcon {
   width: 20px;
   height: 20px;
-  color: var(--text-muted);
+  color: #6b7280;
   flex-shrink: 0;
+  margin-left: 16px;
 }
 
 .input {
   flex: 1;
-  background: none;
   border: none;
   outline: none;
-  font-family: var(--font-body);
-  font-size: 16px;
-  color: var(--text-primary);
+  padding: 14px 16px;
+  font-size: 1rem;
+  color: #1a1a2e;
+  background: transparent;
+  font-family: inherit;
   min-width: 0;
-  caret-color: var(--accent);
 }
+
 .input::placeholder {
-  color: var(--text-muted);
+  color: #9ca3af;
 }
+
 .input:disabled {
   opacity: 0.6;
 }
 
 .divider {
   width: 1px;
-  height: 28px;
-  background: var(--border);
+  background: #e1e8f0;
+  margin: 8px 0;
+  align-self: stretch;
   flex-shrink: 0;
 }
 
@@ -112,78 +61,145 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  padding: 0 12px;
   flex-shrink: 0;
 }
+
 .regionIcon {
-  width: 15px;
-  height: 15px;
-  color: var(--text-muted);
+  color: #6b7280;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
 }
+
 .regionSelect {
-  background: none;
   border: none;
   outline: none;
-  font-family: var(--font-body);
-  font-size: 14px;
-  color: var(--text-secondary);
+  background: transparent;
+  font-size: 0.875rem;
+  color: #1a1a2e;
   cursor: pointer;
-  padding-right: 4px;
-  max-width: 140px;
-}
-.regionSelect option {
-  background: var(--bg-card);
-  color: var(--text-primary);
+  padding: 4px;
+  font-family: inherit;
 }
 
 .btn {
+  background: #0052CC;
+  color: #fff;
+  border: none;
+  padding: 0 28px;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
   display: flex;
   align-items: center;
   gap: 8px;
-  background: linear-gradient(135deg, var(--accent), #2563eb);
-  color: #fff;
-  border: none;
-  padding: 11px 24px;
-  border-radius: 22px;
-  font-family: var(--font-display);
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: all 0.2s;
-  min-width: 110px;
-  justify-content: center;
-}
-.btn:hover:not(:disabled) {
-  background: linear-gradient(135deg, #5590ff, #3d7fff);
-  transform: translateY(-1px);
-}
-.btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-  transform: none;
+  white-space: nowrap;
+  align-self: stretch;
+  border-radius: 0 6px 6px 0;
+  font-family: inherit;
 }
 
-/* Loading dots */
+.btn:hover:not(:disabled) {
+  background: #003d99;
+}
+
+.btn:disabled {
+  background: #93c5fd;
+  cursor: not-allowed;
+}
+
+.btnLoading {
+  opacity: 0.8;
+}
+
 .loader {
   display: flex;
   gap: 4px;
   align-items: center;
 }
+
 .loader span {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
   background: #fff;
   border-radius: 50%;
-  animation: dot-bounce 1.2s ease-in-out infinite;
+  animation: pulse 0.8s ease-in-out infinite;
 }
-.loader span:nth-child(2) { animation-delay: 0.2s; }
-.loader span:nth-child(3) { animation-delay: 0.4s; }
+
+.loader span:nth-child(2) { animation-delay: 0.15s; }
+.loader span:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+.suggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: #fff;
+  border: 1px solid #e1e8f0;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  list-style: none;
+  z-index: 100;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
+}
+
+.suggestions button {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: #1a1a2e;
+  padding: 10px 16px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-family: inherit;
+}
+
+.suggestions button:hover {
+  background: #f0f4ff;
+}
+
+.examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 12px;
+}
+
+.examples button {
+  background: #fff;
+  border: 1px solid #e1e8f0;
+  border-radius: 20px;
+  padding: 5px 14px;
+  font-size: 0.8rem;
+  color: #0052CC;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: inherit;
+}
+
+.examples button:hover:not(:disabled) {
+  background: #e8f0fe;
+  border-color: #0052CC;
+}
+
+.examples button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 @media (max-width: 600px) {
-  .wrap { padding: 6px 6px 6px 14px; gap: 6px; }
-  .divider, .regionWrap { display: none; }
-  .input { font-size: 15px; }
-  .btn { padding: 11px 18px; }
-  .suggestions { left: 12px; right: 12px; }
+  .divider { display: none; }
+  .regionWrap { display: none; }
+  .btn { padding: 0 18px; }
 }

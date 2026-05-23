@@ -64,11 +64,52 @@ class WildberriesParser(BaseParser):
 
     async def search(self, query: str, region: str = "Москва", limit: int = 10) -> list[ProductItem]:
         dest = _get_dest(region)
+
+        # Попытка 1: httpx + SSR HTML (быстрее, WB делает server-side rendering)
+        results = await self._search_ssr(query, dest, limit)
+        if results:
+            logger.info(f"[WB] SSR: {len(results)} items")
+            return results[:limit]
+
+        # Попытка 2: Playwright (полный рендеринг JS)
         results = await self._search_playwright(query, dest, limit)
         if results:
             return results[:limit]
-        logger.warning(f"[WB] Playwright returned 0 results for '{query}'")
+
+        logger.warning(f"[WB] All methods returned 0 for '{query}'")
         return []
+
+    async def _search_ssr(self, query: str, dest: str, limit: int) -> list[ProductItem]:
+        """
+        Извлекает товары из server-side rendered HTML страницы WB.
+        WB рендерит начальное состояние на сервере и вкладывает его в script-теги.
+        """
+        import asyncio, random
+        url = (
+            f"https://www.wildberries.ru/catalog/0/search.aspx"
+            f"?search={query.replace(' ', '+')}&dest={dest}"
+        )
+        try:
+            await asyncio.sleep(random.uniform(1.0, 2.5))
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ru-RU,ru;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Cache-Control": "no-cache",
+                "Cookie": f"dest={dest}; region=80,64,83,4,38,33,70,82",
+            }
+            resp = await self.client.get(url, headers=headers,
+                                         follow_redirects=True, timeout=20.0)
+            if resp.status_code != 200:
+                return []
+            return self._parse_html(resp.text, limit)
+        except Exception as exc:
+            logger.debug(f"[WB SSR] failed: {exc}")
+            return []
 
     async def _search_playwright(self, query: str, dest: str, limit: int) -> list[ProductItem]:
         try:

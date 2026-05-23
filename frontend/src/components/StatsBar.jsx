@@ -4,7 +4,21 @@ const SOURCE_META = {
   'Яндекс Маркет': { color: '#ff9b00', short: 'ЯМ' },
   'Ozon':           { color: '#005bff', short: 'OZ' },
   'Wildberries':    { color: '#cb11ab', short: 'WB' },
-  'Интернет (Рунет)': { color: '#00e5b0', short: 'WEB' },
+  'Интернет (Рунет)': { color: '#00b896', short: 'WEB' },
+}
+
+const STATUS_COLORS = {
+  success: '#16a34a',
+  partial: '#d97706',
+  failed: '#dc2626',
+  timeout: '#dc2626',
+}
+
+const STATUS_LABELS = {
+  success: '',
+  partial: 'PARTIAL',
+  failed: 'FAILED',
+  timeout: 'TIMEOUT',
 }
 
 function fmtPrice(v) {
@@ -34,17 +48,25 @@ export default function StatsBar({ results, activeSource, onSourceChange }) {
             <button
               key={r.source}
               className={`${styles.tab} ${activeSource === r.source ? styles.tabActive : ''}`}
-              style={activeSource === r.source ? { '--tab-color': meta.color } : {}}
               onClick={() => onSourceChange(r.source)}
             >
               <span className={styles.tabDot} style={{ background: meta.color }} />
               <span className={styles.tabName}>{r.source}</span>
               <span className={styles.tabCount}>{r.total_found}</span>
-              {r.status && <span className={`${styles.tabStatus} ${styles[`status_${r.status}`] || ''}`}>{r.status}</span>}
+              {r.status && r.status !== 'success' && (
+                <span
+                  className={styles.statusBadge}
+                  style={{ color: STATUS_COLORS[r.status] || '#888' }}
+                >
+                  {STATUS_LABELS[r.status] || r.status}
+                </span>
+              )}
               {r.price_min && (
                 <span className={styles.tabPrice}>от {fmtPrice(r.price_min)}</span>
               )}
-              {r.price_avg && <span className={styles.tabAvg}>ср. {fmtPrice(r.price_avg)}</span>}
+              {r.price_avg && (
+                <span className={styles.tabAvg}>ср. {fmtPrice(r.price_avg)}</span>
+              )}
             </button>
           )
         })}

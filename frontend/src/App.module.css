@@ -1,169 +1,21 @@
-.app {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  position: relative;
-  overflow-x: hidden;
-}
+.app { min-height: 100vh; display: flex; flex-direction: column; }
+.main { flex: 1; max-width: 1200px; margin: 0 auto; padding: 0 24px 48px; width: 100%; }
+.hero { padding: 32px 0 24px; text-align: center; }
+.heroTitle { font-size: 2rem; font-weight: 700; color: #003087; margin-bottom: 8px; }
+.heroSub { color: #6b7280; font-size: 1rem; margin-bottom: 24px; }
+.footer { background: #003087; color: rgba(255,255,255,0.7); text-align: center; padding: 16px; font-size: 0.85rem; display: flex; align-items: center; justify-content: center; gap: 8px; }
+.footerDot { margin: 0 8px; opacity: 0.5; width: 3px; height: 3px; background: rgba(255,255,255,0.5); border-radius: 50%; display: inline-block; }
+.error { background: #fef2f2; border: 1px solid #fca5a5; border-radius: 8px; padding: 12px 16px; color: #dc2626; margin: 16px 0; display: flex; align-items: center; gap: 8px; }
+.errorIcon { flex-shrink: 0; }
+.emptyState { padding: 32px 0; text-align: center; }
+.emptyGrid { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 32px; }
+.hintChip { background: #fff; border: 1px solid #e1e8f0; border-radius: 20px; padding: 6px 16px; font-size: 0.875rem; color: #0052CC; cursor: pointer; transition: all 0.2s; font-family: inherit; }
+.hintChip:hover { background: #e8f0fe; border-color: #0052CC; }
 
-/* Background */
-.bg {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-}
-.bgGrad1 {
-  position: absolute;
-  top: -20%;
-  left: -10%;
-  width: 60%;
-  height: 60%;
-  background: radial-gradient(ellipse, rgba(61,127,255,0.08) 0%, transparent 70%);
-}
-.bgGrad2 {
-  position: absolute;
-  bottom: 0;
-  right: -10%;
-  width: 50%;
-  height: 50%;
-  background: radial-gradient(ellipse, rgba(255,79,126,0.06) 0%, transparent 70%);
-}
-.bgGrid {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
-  background-size: 60px 60px;
-}
-
-/* Main */
-.main {
-  position: relative;
-  z-index: 1;
-  flex: 1;
-  max-width: 1280px;
-  margin: 0 auto;
-  width: 100%;
-  padding: 0 24px 80px;
-}
-
-/* Hero */
-.hero {
-  text-align: center;
-  padding: 80px 0 48px;
-}
-.heroTag {
-  display: inline-block;
-  font-family: var(--font-display);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--accent);
-  background: rgba(61,127,255,0.1);
-  border: 1px solid rgba(61,127,255,0.25);
-  padding: 5px 14px;
-  border-radius: 100px;
-  margin-bottom: 28px;
-}
-.heroTitle {
-  font-family: var(--font-display);
-  font-size: clamp(42px, 7vw, 80px);
-  font-weight: 900;
-  line-height: 1.05;
-  letter-spacing: -0.03em;
-  color: var(--text-primary);
-  margin-bottom: 18px;
-}
-.heroAccent {
-  color: var(--accent);
-  position: relative;
-}
-.heroAccent::after {
-  content: '';
-  position: absolute;
-  bottom: 4px;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-  border-radius: 2px;
-}
-.heroSub {
-  font-size: 17px;
-  color: var(--text-secondary);
-  margin-bottom: 40px;
-  max-width: 480px;
-  margin-left: auto;
-  margin-right: auto;
-}
-
-/* Error */
-.error {
-  background: rgba(255,79,126,0.08);
-  border: 1px solid rgba(255,79,126,0.25);
-  border-radius: var(--radius-md);
-  padding: 16px 20px;
-  color: var(--accent-2);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  max-width: 640px;
-  margin: 24px auto;
-  font-size: 15px;
-}
-.errorIcon {
-  font-size: 18px;
-  flex-shrink: 0;
-}
-
-/* Empty state */
-.emptyState {
-  padding: 40px 0;
-  text-align: center;
-}
-.emptyGrid {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 10px;
-}
-.hintChip {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
-  padding: 9px 20px;
-  border-radius: 100px;
-  font-family: var(--font-body);
-  font-size: 14px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.hintChip:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: rgba(61,127,255,0.06);
-}
-
-/* Footer */
-.footer {
-  position: relative;
-  z-index: 1;
-  text-align: center;
-  padding: 24px;
-  font-size: 13px;
-  color: var(--text-muted);
-  border-top: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-}
-.footerDot {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: var(--text-muted);
-}
+/* These are no longer used but kept to avoid breaking anything */
+.bg { display: none; }
+.bgGrad1 { display: none; }
+.bgGrad2 { display: none; }
+.bgGrid { display: none; }
+.heroTag { display: none; }
+.heroAccent { color: #003087; }

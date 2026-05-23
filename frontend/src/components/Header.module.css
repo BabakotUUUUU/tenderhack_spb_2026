@@ -1,76 +1,11 @@
-.header {
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  background: rgba(10,11,15,0.85);
-  backdrop-filter: blur(20px);
-  border-bottom: 1px solid var(--border);
-}
-.inner {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 0 24px;
-  height: 64px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.logo {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.logoMark {
-  width: 36px;
-  height: 36px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-.logoP {
-  font-family: var(--font-display);
-  font-weight: 900;
-  font-size: 18px;
-  color: #fff;
-}
-.logoName {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 16px;
-  letter-spacing: -0.02em;
-}
-.logoSub {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: -2px;
-}
-.sources {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.sourceChip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  border-radius: 100px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  font-size: 12px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-.sourceDot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
+.header { background: #003087; padding: 0; border-bottom: 3px solid #e52322; }
+.inner { max-width: 1200px; margin: 0 auto; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; }
+.logo { display: flex; align-items: center; gap: 12px; }
+.logoIcon { font-size: 1.5rem; font-weight: 900; color: #fff; background: #e52322; width: 36px; height: 36px; border-radius: 6px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.logoTitle { font-size: 1.1rem; font-weight: 700; color: #fff; }
+.logoSub { font-size: 0.75rem; color: rgba(255,255,255,0.6); }
+.badge { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; padding: 4px 12px; color: rgba(255,255,255,0.8); font-size: 0.75rem; }
 
 @media (max-width: 640px) {
-  .sources { display: none; }
+  .badge { display: none; }
 }

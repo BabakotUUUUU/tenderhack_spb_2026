@@ -2,16 +2,17 @@
   max-width: 760px;
   margin: 24px auto 48px;
   padding: 28px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg-card);
+  background: #fff;
+  border: 1px solid #e1e8f0;
+  border-radius: 8px;
   text-align: center;
-  color: var(--text-primary);
+  color: #1a1a2e;
 }
 
 .hint {
-  color: var(--text-muted);
+  color: #6b7280;
   margin: 8px 0 0;
+  font-size: 0.9375rem;
 }
 
 .warnings {
@@ -19,6 +20,10 @@
   flex-direction: column;
   gap: 6px;
   margin-top: 16px;
-  color: #ffcc66;
-  font-size: 12px;
+  color: #d97706;
+  font-size: 0.8125rem;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+  padding: 10px 14px;
 }

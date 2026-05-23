@@ -1,36 +1,42 @@
 .banner {
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  padding: 10px 16px;
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  background: rgba(0,229,176,0.06);
-  border: 1px solid rgba(0,229,176,0.2);
-  border-radius: var(--radius-md);
-  padding: 12px 18px;
+  font-size: 0.875rem;
+  margin-bottom: 16px;
   max-width: 900px;
-  margin: 0 auto 16px;
-  font-size: 14px;
-  color: var(--text-secondary);
-  animation: fadeUp 0.3s ease;
+  margin-left: auto;
+  margin-right: auto;
 }
+
 .icon {
+  color: #d97706;
+  flex-shrink: 0;
   width: 16px;
   height: 16px;
-  color: var(--accent-3);
-  flex-shrink: 0;
+  margin-top: 2px;
 }
+
 .original {
-  color: var(--text-muted);
+  color: #92400e;
   text-decoration: line-through;
+  margin: 0 4px;
 }
+
 .corrected {
-  color: var(--accent-3);
+  color: #003087;
   font-weight: 600;
+  margin: 0 4px;
 }
 
 .extra {
   display: block;
   margin-top: 4px;
-  color: var(--text-muted);
-  font-size: 12px;
+  color: #78350f;
+  font-size: 0.75rem;
   line-height: 1.4;
 }

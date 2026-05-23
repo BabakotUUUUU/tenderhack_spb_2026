@@ -1,25 +1,30 @@
 .wrap {
   display: flex;
   flex-direction: column;
-  gap: 48px;
-  animation: fadeUp 0.4s ease;
+  gap: 32px;
 }
 
 .noResults {
   text-align: center;
-  padding: 80px 0;
+  padding: 60px 24px;
+  background: #fff;
+  border: 1px solid #e1e8f0;
+  border-radius: 8px;
 }
+
 .noResultsIcon {
   font-size: 48px;
   margin-bottom: 16px;
 }
+
 .noResultsTitle {
-  font-family: var(--font-display);
-  font-size: 22px;
+  font-size: 1.25rem;
   font-weight: 700;
+  color: #003087;
   margin-bottom: 8px;
 }
+
 .noResultsSub {
-  color: var(--text-muted);
-  font-size: 15px;
+  color: #6b7280;
+  font-size: 0.9375rem;
 }
