@@ -28,14 +28,10 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning(f"[Main] Index init failed: {exc}")
 
-    # ── Фоновая индексация (non-blocking task) ────────────────────────────
+    # Фоновая индексация отключена: она конкурировала с live-краулером за
+    # соединения к 4tochki.ru/foroffice.ru и приводила к таймаутам поиска.
+    # Индекс заполняется инкрементально через результаты пользовательских поисков.
     bg_task = None
-    try:
-        from app.crawler.background import background_indexer_loop
-        bg_task = asyncio.create_task(background_indexer_loop())
-        logger.info("[Main] Background indexer started")
-    except Exception as exc:
-        logger.warning(f"[Main] Background indexer not started: {exc}")
 
     yield
 

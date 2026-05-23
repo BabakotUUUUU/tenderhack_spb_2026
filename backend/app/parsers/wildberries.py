@@ -35,10 +35,11 @@ REGION_DEST: dict[str, str] = {
     "default":         "-1257786",
 }
 
+# Пробуем несколько версий эндпоинта — WB периодически меняет версию
 WB_SEARCH_ENDPOINTS = [
+    "https://search.wb.ru/exactmatch/ru/common/v7/search",
     "https://search.wb.ru/exactmatch/ru/common/v4/search",
     "https://search.wb.ru/exactmatch/ru/common/v5/search",
-    "https://search.wb.ru/exactmatch/ru/common/v7/search",
     "https://search.wb.ru/exactmatch/ru/male/v5/search",
     "https://search.wb.ru/exactmatch/ru/female/v5/search",
 ]
@@ -81,6 +82,7 @@ class WildberriesParser(BaseParser):
     domain = "wildberries.ru"
 
     async def search(self, query: str, region: str = "Москва", limit: int = 10) -> list[ProductItem]:
+        import asyncio as _asyncio
         dest = _dest(region)
         params = {
             "ab_testing": "false",
@@ -98,30 +100,42 @@ class WildberriesParser(BaseParser):
         headers = json_headers("https://www.wildberries.ru/")
         headers["Origin"] = "https://www.wildberries.ru"
 
-        async with Fetcher(timeout=8.0) as f:
-            for endpoint in WB_SEARCH_ENDPOINTS:
-                data = await f.get_json(endpoint, headers=headers, params=params, retries=0)
-                if not data:
-                    continue
+        # Запускаем все эндпоинты параллельно: первый успешный ответ возвращается.
+        # connect_timeout=2.5s: если все WB-хосты блокированы — провалимся за ~3s.
+        async with Fetcher(timeout=5.0, connect_timeout=2.5) as f:
+            async def _try(endpoint: str):
+                return await f.get_json(endpoint, headers=headers, params=params, retries=0)
 
-                products = data.get("data", {}).get("products", [])
-                if not products:
-                    continue
-
-                results: list[ProductItem] = []
-                for p in products:
-                    item = self._parse(p)
-                    if item:
-                        results.append(item)
-                    if len(results) >= limit:
+            tasks = [_asyncio.create_task(_try(ep)) for ep in WB_SEARCH_ENDPOINTS[:3]]
+            data = None
+            try:
+                for coro in _asyncio.as_completed(tasks):
+                    result = await coro
+                    if result and result.get("data", {}).get("products"):
+                        data = result
                         break
+            finally:
+                for t in tasks:
+                    t.cancel()
 
-                if results:
-                    logger.info(f"[WB] {len(results)} items via {endpoint}")
-                    return results
+        if not data:
+            logger.warning(f"[WB] 0 items for '{query}'")
+            return []
 
-        logger.warning(f"[WB] 0 items for '{query}'")
-        return []
+        products = data.get("data", {}).get("products", [])
+        results: list[ProductItem] = []
+        for p in products:
+            item = self._parse(p)
+            if item:
+                results.append(item)
+            if len(results) >= limit:
+                break
+
+        if results:
+            logger.info(f"[WB] {len(results)} items")
+        else:
+            logger.warning(f"[WB] 0 items for '{query}'")
+        return results
 
     def _parse(self, p: dict) -> Optional[ProductItem]:
         nm_id = p.get("id")
@@ -132,7 +146,6 @@ class WildberriesParser(BaseParser):
         brand = p.get("brand", "")
         title = f"{brand} {name}".strip() if brand else name
 
-        # Цена из sizes → price
         price = None
         for size in (p.get("sizes") or []):
             pb = size.get("price") or {}

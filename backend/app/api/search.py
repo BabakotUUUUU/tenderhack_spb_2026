@@ -211,7 +211,9 @@ async def _run_parser_source(
 
     try:
         items = await asyncio.wait_for(_attempt(query), timeout=PARSER_TIMEOUT_SECONDS)
-        if not items and variants:
+        # Retry только для быстрых источников — Runet уже имеет внутренний fallback
+        # и retry удвоит время выполнения (2 × 22s > PARSER_TIMEOUT).
+        if not items and variants and source_key != "runet":
             retry_query = next((v for v in variants if v != query), None)
             if retry_query:
                 items = await asyncio.wait_for(_attempt(retry_query), timeout=PARSER_TIMEOUT_SECONDS)
@@ -229,6 +231,8 @@ async def _run_parser_source(
 
 
 async def _search_impl(q: str, region: str, limit: int) -> SearchResponse:
+    from app.crawler.priority import search_started, search_ended
+    search_started()
     started = time.perf_counter()
     nlp = process_query(q)
     primary = nlp["primary_query"]
@@ -242,7 +246,10 @@ async def _search_impl(q: str, region: str, limit: int) -> SearchResponse:
         "yandex_market": _run_parser_source("yandex_market", YandexMarketParser, primary, region, limit, variants),
         "runet": _run_parser_source("runet", RunetParser, primary, region, runet_limit, variants),
     }
-    raw = await asyncio.gather(*parser_tasks.values())
+    try:
+        raw = await asyncio.gather(*parser_tasks.values())
+    finally:
+        search_ended()
     by_key = dict(zip(parser_tasks.keys(), raw))
 
     ranked: dict[str, list[ProductItem]] = {}

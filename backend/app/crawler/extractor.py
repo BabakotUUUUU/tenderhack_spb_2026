@@ -198,10 +198,9 @@ def _try_opengraph(soup: BeautifulSoup, page_url: str) -> Optional[ExtractedProd
 
 def _try_microdata(soup: BeautifulSoup, page_url: str) -> Optional[ExtractedProduct]:
     """Извлекает данные из HTML microdata (itemprop)."""
-    product_el = (
-        soup.find(attrs={"itemtype": re.compile(r"schema\.org/Product", re.I)})
-        or soup.find(attrs={"itemscope": True, "itemtype": True})
-    )
+    # Только schema.org/Product — широкий fallback на любой itemscope/itemtype
+    # ловил breadcrumb-элементы ("Каталог") вместо товара.
+    product_el = soup.find(attrs={"itemtype": re.compile(r"schema\.org/Product", re.I)})
     if not product_el:
         return None
 
@@ -283,6 +282,98 @@ def _try_heuristic(soup: BeautifulSoup, page_url: str) -> Optional[ExtractedProd
     )
 
 
+def _try_json_ld_regex(html: str, page_url: str) -> Optional[ExtractedProduct]:
+    """
+    Regex-based JSON-LD extraction from raw HTML (no truncation).
+    Used before BeautifulSoup so JSON-LD near end of large pages is still found.
+    Scans up to 1MB of HTML.
+    """
+    for m in re.finditer(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html[:1_000_000],
+        re.DOTALL | re.IGNORECASE,
+    ):
+        try:
+            raw = m.group(1).strip()
+            if not raw:
+                continue
+            data = json.loads(raw)
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                t = item.get("@type", "")
+                if t not in ("Product", "Offer", "AggregateOffer"):
+                    graph = item.get("@graph", [])
+                    for g in graph:
+                        if isinstance(g, dict) and g.get("@type") == "Product":
+                            item = g
+                            t = "Product"
+                            break
+                    else:
+                        continue
+
+                title = item.get("name") or item.get("title") or ""
+                if not title:
+                    continue
+
+                price = None
+                old_price = None
+                offers = item.get("offers", item if t == "Offer" else {})
+                if isinstance(offers, list):
+                    offers = offers[0] if offers else {}
+                if isinstance(offers, dict):
+                    price = _clean_price(offers.get("price") or offers.get("lowPrice"))
+                    old_price = _clean_price(offers.get("highPrice"))
+
+                img = item.get("image")
+                image_url = None
+                if isinstance(img, str):
+                    image_url = img
+                elif isinstance(img, list) and img:
+                    image_url = img[0] if isinstance(img[0], str) else (img[0].get("url") if isinstance(img[0], dict) else None)
+                elif isinstance(img, dict):
+                    image_url = img.get("url")
+
+                brand_data = item.get("brand")
+                brand = None
+                if isinstance(brand_data, dict):
+                    brand = brand_data.get("name")
+                elif isinstance(brand_data, str):
+                    brand = brand_data
+
+                chars = {}
+                for prop in item.get("additionalProperty", [])[:8]:
+                    if isinstance(prop, dict):
+                        k = prop.get("name", "")
+                        v = prop.get("value", "")
+                        if k and v:
+                            chars[k] = str(v)
+                if brand:
+                    chars["Бренд"] = brand
+
+                desc = item.get("description", "")
+                if isinstance(desc, str):
+                    desc = desc[:200]
+
+                return ExtractedProduct(
+                    title=str(title).strip(),
+                    price=price,
+                    old_price=old_price,
+                    image_url=image_url,
+                    url=page_url,
+                    domain=_extract_domain(page_url),
+                    description=desc,
+                    brand=brand,
+                    category=item.get("category"),
+                    characteristics=chars,
+                )
+        except Exception as exc:
+            logger.debug(f"[Extractor] JSON-LD regex parse error: {exc}")
+            continue
+    return None
+
+
 def extract_product(html: str, page_url: str) -> Optional[ExtractedProduct]:
     """
     Основная функция извлечения товара из HTML.
@@ -291,7 +382,15 @@ def extract_product(html: str, page_url: str) -> Optional[ExtractedProduct]:
     if not html or len(html) < 200:
         return None
 
-    # Обрезаем слишком большие страницы для скорости
+    # JSON-LD via regex первым — работает с полным HTML, без truncation
+    # (JSON-LD часто находится ближе к концу страницы, после 500KB cutoff)
+    ld_result = _try_json_ld_regex(html, page_url)
+    if ld_result and ld_result.price:
+        if ld_result.image_url and not ld_result.image_url.startswith("http"):
+            ld_result.image_url = urljoin(page_url, ld_result.image_url)
+        return ld_result
+
+    # BeautifulSoup на усечённом HTML для остальных методов
     if len(html) > 500_000:
         html = html[:500_000]
 
@@ -304,14 +403,13 @@ def extract_product(html: str, page_url: str) -> Optional[ExtractedProduct]:
             return None
 
     result = (
-        _try_json_ld(soup, page_url)
-        or _try_microdata(soup, page_url)
+        _try_microdata(soup, page_url)
         or _try_opengraph(soup, page_url)
         or _try_heuristic(soup, page_url)
+        or ld_result  # JSON-LD без цены как последний запасной вариант
     )
 
     if result and result.title:
-        # Фиксируем относительные image URL
         if result.image_url and not result.image_url.startswith("http"):
             result.image_url = urljoin(page_url, result.image_url)
         return result

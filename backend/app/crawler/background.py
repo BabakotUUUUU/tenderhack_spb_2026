@@ -21,21 +21,18 @@ logger = logging.getLogger(__name__)
 MIN_INDEXED = 30          # минимум страниц для пропуска pre-crawl
 REFRESH_INTERVAL_H = 2    # часов между refresh-циклами
 
-# Репрезентативные запросы для предварительной индексации по категориям
+# Репрезентативные запросы для предварительной индексации.
+# Только источники с подтверждённым доступом без прокси:
+#   4tochki.ru (шины), foroffice.ru (оргтехника).
+# Clothing-сайты (sportmaster, kari) — требуют Playwright + заблокированы.
 _SEED_TASKS: list[tuple[str, str]] = [
     # (category, query)
     ("tires",       "шины r16"),
-    ("tires",       "зимние шины"),
-    ("tires",       "летние шины"),
-    ("tires",       "покрышки r17"),
-    ("office_tech", "ноутбук"),
-    ("office_tech", "принтер"),
-    ("office_tech", "монитор"),
+    ("tires",       "зимние шины r17"),
+    ("tires",       "летние шины 205 55"),
+    ("office_tech", "принтер лазерный"),
     ("office_tech", "мфу"),
-    ("clothing",    "куртка"),
-    ("clothing",    "кроссовки"),
-    ("clothing",    "джинсы"),
-    ("clothing",    "пуховик"),
+    ("office_tech", "картридж"),
 ]
 
 
@@ -43,8 +40,12 @@ async def _index_one(category: str, query: str, max_products: int = 8) -> int:
     """Краулит seed-сайты по одному запросу и индексирует найденное."""
     from app.crawler.crawler import crawl_category_seeds
     from app.crawler.extractor import ExtractedProduct
+    from app.crawler.priority import yield_to_live_search
     from app.crawler.seeds import get_seeds_for_category
     from app.search_index.indexer import index_product
+
+    # Не мешаем живым поискам
+    await yield_to_live_search()
 
     seeds = get_seeds_for_category(category)
     products: list[ExtractedProduct] = []
@@ -54,11 +55,11 @@ async def _index_one(category: str, query: str, max_products: int = 8) -> int:
 
     try:
         await crawl_category_seeds(
-            seeds=seeds[:4],           # не более 4 сайтов на один запрос
+            seeds=seeds[:2],           # не более 2 сайтов за раз
             query=query,
             on_product=on_product,
             max_total=max_products,
-            max_concurrent_seeds=2,    # щадящий параллелизм
+            max_concurrent_seeds=1,    # одиночный краулинг чтобы не конкурировать с live
         )
     except Exception as exc:
         logger.debug(f"[BG] crawl error '{query}': {exc}")

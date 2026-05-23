@@ -5,6 +5,8 @@
 embedded JSON из script-тегов (window.__NUXT__, application/json).
 Дополнительно: DOM-парсинг через BeautifulSoup как fallback.
 
+Если httpx получает 403 (антибот) — сразу переходим к Playwright.
+
 Не использует никаких API-эндпоинтов с ключами.
 """
 
@@ -21,7 +23,7 @@ from app.parsers.http_client import Fetcher, browser_headers
 
 logger = logging.getLogger(__name__)
 
-_PRICE_RE = re.compile(r"(\d[\d\s ]{1,10})\s*₽")
+_PRICE_RE = re.compile(r"(\d[\d\s ]{1,10})\s*₽")
 
 
 def _price(value) -> Optional[float]:
@@ -44,33 +46,53 @@ class OzonParser(BaseParser):
 
     async def search(self, query: str, region: str = "Москва", limit: int = 10) -> list[ProductItem]:
         headers = browser_headers("https://www.ozon.ru/")
+        headers["Cookie"] = "guest=1; ab_id=1;"
         params  = {"text": query, "from_global": "true"}
 
-        async with Fetcher(timeout=18.0) as f:
-            html = await f.get_text(
+        html: Optional[str] = None
+        got_403 = False
+
+        async with Fetcher(timeout=14.0, connect_timeout=5.0) as f:
+            raw = await f.get_text(
                 "https://www.ozon.ru/search/",
                 headers=headers,
                 params=params,
-                retries=1,
+                retries=0,  # одна попытка — если 403, сразу Playwright
+                return_on_status={403},
             )
+
+        if raw and len(raw) > 10_000:
+            # Пробуем извлечь данные даже из 403-страницы
+            results = self._from_embedded(raw, limit)
+            if results:
+                logger.info(f"[Ozon] embedded JSON (first try): {len(results)} items")
+                return results
+            results = self._from_dom(raw, limit)
+            if results:
+                logger.info(f"[Ozon] DOM (first try): {len(results)} items")
+                return results
+            # Страница явно антибот (маленький JS-чекер) — идём в Playwright
+            if "antibot" in raw.lower() or "challenge" in raw.lower() or len(raw) < 50_000:
+                got_403 = True
+                html = None
+            else:
+                html = raw
+        else:
+            got_403 = True
+
+        if got_403 or not html:
+            logger.warning("[Ozon] httpx blocked (antibot), no proxy configured — skipping")
+            return []
 
         if html:
             results = self._from_embedded(html, limit)
             if results:
                 logger.info(f"[Ozon] embedded JSON: {len(results)} items")
                 return results
-
             results = self._from_dom(html, limit)
             if results:
                 logger.info(f"[Ozon] DOM: {len(results)} items")
                 return results
-        else:
-            logger.warning(f"[Ozon] no HTML via httpx for '{query}', trying Playwright")
-
-        results = await self._search_playwright(query, limit)
-        if results:
-            logger.info(f"[Ozon] Playwright: {len(results)} items")
-            return results
 
         logger.warning(f"[Ozon] 0 items for '{query}'")
         return []
@@ -80,7 +102,6 @@ class OzonParser(BaseParser):
     def _from_embedded(self, html: str, limit: int) -> list[ProductItem]:
         results: list[ProductItem] = []
 
-        # Паттерн 1: application/json script-теги
         soup = BeautifulSoup(html[:800_000], "lxml")
         for tag in soup.find_all("script", {"type": "application/json"}):
             try:
@@ -97,7 +118,6 @@ class OzonParser(BaseParser):
         if results:
             return _dedupe(results)
 
-        # Паттерн 2: window.__NUXT__ и похожие inline-переменные
         for m in re.finditer(
             r'(?:window\.__(?:NUXT|INITIAL_STATE|STATE)__\s*=\s*|"widgetStates"\s*:\s*)(\{.{100,}?\}(?=[,;\s]|$))',
             html[:1_000_000],
@@ -317,9 +337,10 @@ class OzonParser(BaseParser):
         try:
             page = await new_page()
             url = f"https://www.ozon.ru/search/?text={quote_plus(query)}&from_global=true"
-            await page.goto(url, wait_until="domcontentloaded", timeout=18_000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=25_000)
+            # Ждём рендеринга продуктов
             try:
-                await page.wait_for_selector('a[href*="/product/"]', timeout=8_000)
+                await page.wait_for_selector('a[href*="/product/"]', timeout=10_000)
             except Exception:
                 pass
             html = await page.content()

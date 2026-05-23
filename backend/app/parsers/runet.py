@@ -115,13 +115,19 @@ class RunetParser(BaseParser):
             def on_extracted(ep: ExtractedProduct) -> None:
                 crawled_products.append(ep)
 
-            await crawl_category_seeds(
-                seeds=seeds,
-                query=query,
-                on_product=on_extracted,
-                max_total=remaining + 4,  # с запасом для дедупликации
-                max_concurrent_seeds=3,
-            )
+            try:
+                await asyncio.wait_for(
+                    crawl_category_seeds(
+                        seeds=seeds[:2],           # не более 2 seeds за раз
+                        query=query,
+                        on_product=on_extracted,
+                        max_total=remaining + 2,
+                        max_concurrent_seeds=1,    # последовательно чтобы не перегружать сайт
+                    ),
+                    timeout=22.0,  # жёсткий потолок для краулера
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[Runet] crawl timeout, using partial results")
 
             # Индексируем найденное и добавляем в результаты
             for ep in crawled_products:
