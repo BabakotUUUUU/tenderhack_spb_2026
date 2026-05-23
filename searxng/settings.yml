@@ -1,0 +1,74 @@
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "TenderHack Search"
+  privacypolicy_url: false
+  contact_url: false
+  enable_metrics: false
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "tenderhack_secret_2026_xk92mpl"
+  limiter: false
+  public_instance: false
+  image_proxy: false
+
+ui:
+  static_use_hash: false
+  default_locale: "ru"
+  query_in_title: true
+  infinite_scroll: false
+  default_theme: simple
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "ru"
+  ban_time_on_fail: 5
+  max_ban_time_on_fail: 120
+  formats:
+    - html
+    - json
+
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 15.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true
+
+engines:
+  - name: google
+    engine: google
+    language: ru
+    region: ru-RU
+    disabled: false
+    weight: 3
+
+  - name: bing
+    engine: bing
+    language: ru
+    region: ru-RU
+    disabled: false
+    weight: 2
+
+  - name: duckduckgo
+    engine: duckduckgo
+    language: ru
+    region: ru-ru
+    disabled: false
+    weight: 1
+
+  - name: yandex
+    engine: yandex
+    language: ru
+    disabled: false
+    weight: 2
+
+categories_as_tabs:
+  general:
+    name: General
+    title: Поиск
+    shown: true

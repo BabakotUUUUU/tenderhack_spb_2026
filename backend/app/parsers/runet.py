@@ -10,8 +10,9 @@ from app.parsers.http_client import Fetcher, browser_headers
 
 SITE_POOL = {
     "tires": ["4tochki.ru", "autoopt.ru", "shina-guide.ru", "tyres-auto.ru"],
-    "office": ["foroffice.ru", "oldi.ru", "price.ru", "officemag.ru"],
-    "clothes": ["1click.ru", "bonprix.ru", "kari.com", "sneakerhead.ru"],
+    "office": ["foroffice.ru", "oldi.ru", "price.ru", "komus.ru"],
+    # Clothes: sites with accessible HTTP and product price data
+    "clothes": ["bonprix.ru", "kari.com", "befree.ru", "wildberries.ru"],
 }
 
 SEARCH_PATTERNS = [
@@ -45,6 +46,93 @@ ADAPTERS = {
         "allow": ["/product/", "/offers/"],
         "seller_patterns": [r"Магазин[:\s]+([^.!?]{2,80})", r"Продавец[:\s]+([^.!?]{2,80})"],
     },
+    "komus.ru": {
+        "search": [
+            "https://www.komus.ru/search/?q={q}",
+            "https://www.komus.ru/katalog/?search={q}",
+        ],
+        "allow": ["/product/", "/g/"],
+        "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})", r"Производитель[:\s]+([^;,.|]{2,60})"],
+        "seller": "Комус",
+    },
+    "sportmaster.ru": {
+        "preflight": "https://www.sportmaster.ru/",
+        "search": [
+            "https://www.sportmaster.ru/catalog/search/?text={q}",
+            "https://www.sportmaster.ru/search/?text={q}",
+        ],
+        "allow": ["/product/"],
+        "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})", r"Производитель[:\s]+([^;,.|]{2,60})"],
+        "seller": "Спортмастер",
+    },
+    "wildberries.ru": {
+        "search": [
+            "https://www.wildberries.ru/catalog/0/search.aspx?search={q}",
+            "https://www.wildberries.ru/catalog/odezda-obuv-aksessuary/search.aspx?search={q}",
+        ],
+        "allow": ["/catalog/"],
+        "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})", r"Производитель[:\s]+([^;,.|]{2,60})"],
+        "seller": "Wildberries",
+    },
+    "bonprix.ru": {
+        "search": [
+            "https://www.bonprix.ru/search/{q}/",
+            "https://www.bonprix.ru/?s={q}",
+        ],
+        "allow": ["/produkt/", "/catalog/", "/product/"],
+        "seller": "bonprix",
+    },
+    "kari.com": {
+        "preflight": "https://kari.com/",
+        "search": [
+            "https://kari.com/catalog/?q={q}",
+            "https://kari.com/search/?q={q}",
+        ],
+        "allow": ["/catalog/product/", "/product/"],
+        "seller": "kari",
+    },
+    "befree.ru": {
+        "preflight": "https://befree.ru/",
+        "search": [
+            "https://befree.ru/catalog/search/?q={q}",
+            "https://befree.ru/search/?q={q}",
+        ],
+        "allow": ["/catalog/", "/product/", "/item/"],
+        "seller": "befree",
+    },
+    "kari.com": {
+        "search": [
+            "https://kari.com/catalog/?q={q}",
+            "https://kari.com/search/?q={q}",
+            "https://kari.com/catalog/search/?q={q}",
+        ],
+        "allow": ["/catalog/product/", "/product/", "/catalog/"],
+        "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})"],
+        "seller": "kari",
+    },
+    "lamoda.ru": {
+        "search": [
+            "https://www.lamoda.ru/catalogsearch/result/?q={q}",
+            "https://www.lamoda.ru/search/?text={q}",
+        ],
+        "allow": ["/p/", "/product/"],
+        "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})", r"([A-Z][a-z]+(?:\s[A-Z][a-z]+)?) — "],
+        "seller": "Lamoda",
+    },
+    "befree.ru": {
+        "search": [
+            "https://befree.ru/catalog/search/?q={q}",
+            "https://befree.ru/search/?q={q}",
+            "https://befree.ru/?q={q}",
+        ],
+        "allow": ["/catalog/", "/product/", "/item/"],
+        "seller": "befree",
+    },
+    "autoopt.ru": {
+        "search": ["https://autoopt.ru/search/?q={q}", "https://autoopt.ru/catalog/?text={q}"],
+        "allow": ["/catalog/", "/product/", "/item/"],
+        "seller": "АвтоОпт",
+    },
 }
 
 
@@ -55,7 +143,13 @@ class RunetParser:
         hosts = SITE_POOL.get(category, SITE_POOL["tires"])
         per_host = max(1, limit // max(1, len(hosts)) + 1)
         async with Fetcher() as fetcher:
-            tasks = [self._search_host(fetcher, host, query, region, category, per_host) for host in hosts]
+            tasks = [
+                asyncio.wait_for(
+                    self._search_host(fetcher, host, query, region, category, per_host),
+                    timeout=16,
+                )
+                for host in hosts
+            ]
             chunks = await asyncio.gather(*tasks, return_exceptions=True)
         items: list[ProductItem] = []
         for chunk in chunks:
@@ -71,32 +165,52 @@ class RunetParser:
         base_url = f"https://{host}/"
         adapter = ADAPTERS.get(host, {})
         links: list[str] = []
+        # Preflight: some sites (e.g. sportmaster) require a homepage visit for session cookies
+        if adapter.get("preflight"):
+            try:
+                await asyncio.wait_for(
+                    fetcher.get_text(adapter["preflight"], source=self.source, headers=browser_headers(referer="https://www.google.com/", source=self.source), retries=0),
+                    timeout=3,
+                )
+            except Exception:
+                pass
+
         patterns = adapter.get("search") or SEARCH_PATTERNS
         for pattern in patterns:
             url = pattern.format(host=host, q=q)
+            should_try_browser = False
             try:
                 resp = await asyncio.wait_for(
                     fetcher.get_text(url, source=self.source, headers=browser_headers(referer=base_url, source=self.source), retries=0),
-                    timeout=4,
+                    timeout=3,
                 )
+                if resp.blocked:
+                    should_try_browser = True
+                    html = ""
+                else:
+                    html = resp.text or ""
             except Exception:
-                continue
-            if resp.blocked:
+                # Connection error — try browser fallback directly
+                should_try_browser = True
+                html = ""
+            if should_try_browser:
                 try:
                     rendered = await asyncio.wait_for(
                         fetch_rendered_html(
                             url,
                             referer=base_url,
-                            wait_selectors=['a[href*="/catalog/"]', 'a[href*="/product"]', ".product", ".item"],
-                            scroll_steps=1,
+                            wait_selectors=['a[href*="/catalog/"]', 'a[href*="/product"]', ".product", ".item", "article"],
+                            scroll_steps=2,
                         ),
-                        timeout=5,
+                        timeout=12,
                     )
                 except Exception:
                     rendered = None
-                html = rendered.html if rendered and rendered.status != "blocked" else ""
-            else:
-                html = resp.text
+                if rendered and rendered.status == "ok":
+                    html = rendered.html or ""
+                elif rendered and rendered.product_payloads:
+                    # XHR capture hit — extract links from payloads later
+                    html = rendered.html or ""
             links = self._filter_links(extract_product_links(html, url), host, adapter)
             if links:
                 break
@@ -109,7 +223,7 @@ class RunetParser:
             try:
                 detail = await asyncio.wait_for(
                     fetcher.get_text(link, source=self.source, referer=base_url, retries=0),
-                    timeout=4,
+                    timeout=3,
                 )
             except Exception:
                 continue
@@ -164,7 +278,6 @@ class RunetParser:
             price_match = re.search(r"(?:цена|стоимость)[^\d]{0,20}(\d[\d\s]{2,12})\s*(?:₽|руб)", text, re.I)
             if price_match:
                 item.price = normalize_price(price_match.group(1))
-        # Common shop pages often expose coordinates in map widgets.
         coord_match = re.search(r"(?<!\d)([45]\d\.\d{3,}|6[0-9]\.\d{3,})[,;\s]+([3-5]\d\.\d{3,})", text)
         if coord_match and item.geo.get("latitude") is None:
             try:
@@ -186,7 +299,7 @@ class RunetParser:
         category_hints = {
             "tires": ("shin", "tyre", "tire", "шины", "rezin", "catalog"),
             "office": ("printer", "mfu", "office", "орг", "canon", "hp", "catalog"),
-            "clothes": ("odezh", "clothes", "kurt", "futbol", "sneaker", "catalog"),
+            "clothes": ("odezh", "clothes", "kurt", "futbol", "sneaker", "catalog", "apparel", "fashion"),
         }.get(category, ("product", "catalog"))
 
         seen_sitemaps: set[str] = set()
@@ -209,7 +322,6 @@ class RunetParser:
                 if not any(hint in lower for hint in category_hints):
                     continue
                 if query_tokens and not any(token in lower for token in query_tokens):
-                    # Keep category matches too, but prefer query-like URLs.
                     if len(found) > limit // 2:
                         continue
                 if url not in found:

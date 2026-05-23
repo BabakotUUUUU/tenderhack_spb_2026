@@ -21,6 +21,8 @@ class OzonParser:
         items: list[ProductItem] = []
         candidate_html = ""
 
+        _conn_errors = 0
+        _blocked_reason = ""
         async with Fetcher() as fetcher:
             composer = await self._composer_search(fetcher, query)
             if composer:
@@ -34,12 +36,28 @@ class OzonParser:
                             fetcher.get_text(url, source=self.source, headers=browser_headers(source=self.source), retries=0),
                             timeout=4,
                         )
-                    except Exception:
+                    except asyncio.TimeoutError:
+                        _conn_errors += 1
+                        _blocked_reason = _blocked_reason or "connection timeout — Ozon unreachable from current IP"
+                        continue
+                    except Exception as exc:
+                        _conn_errors += 1
+                        _blocked_reason = _blocked_reason or f"connection error: {type(exc).__name__}"
                         continue
                     if resp.text and not resp.blocked:
                         candidate_html = resp.text
                         search_url = url
                         break
+                    if resp.blocked:
+                        _blocked_reason = _blocked_reason or f"HTTP {resp.status_code}: Ozon anti-bot"
+
+            if _conn_errors == 2 and not items:
+                return SourceResult(
+                    self.source,
+                    "blocked",
+                    errorReason=_blocked_reason,
+                    diagnostics={"operatorAction": "configure PROXY_URL env variable to access Ozon"},
+                )
 
             if not items and resp and resp.blocked:
                 try:
@@ -50,12 +68,17 @@ class OzonParser:
                             wait_selectors=['a[href*="/product/"]', '[data-widget*="searchResults" i]'],
                             scroll_steps=2,
                         ),
-                        timeout=8,
+                        timeout=15,
                     )
                 except Exception:
                     rendered = None
                 if not rendered:
-                    return SourceResult(self.source, "empty", errorReason="Ozon browser fallback timeout")
+                    return SourceResult(
+                        self.source,
+                        "blocked",
+                        errorReason=_blocked_reason or "Ozon anti-bot — browser fallback failed",
+                        diagnostics={"operatorAction": "configure PROXY_URL env variable to access Ozon"},
+                    )
                 if rendered.status == "blocked" and not rendered.product_payloads:
                     return SourceResult(
                         self.source,
@@ -64,7 +87,7 @@ class OzonParser:
                         diagnostics={
                             "blockedUrl": search_url,
                             "legalFallbacksTried": ["composer_json", "html", "playwright_render", "xhr_capture"],
-                            "operatorAction": "open source manually or configure PROXY_URL/PROXY_LIST",
+                            "operatorAction": "configure PROXY_URL/PROXY_LIST env variable",
                         },
                     )
                 candidate_html = rendered.html or candidate_html

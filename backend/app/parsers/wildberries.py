@@ -58,13 +58,20 @@ class WildberriesParser:
         }
         async with Fetcher() as fetcher:
             blocked_reason = ""
+            _conn_errors = 0
             for endpoint in SEARCH_ENDPOINTS[:2]:
                 try:
                     resp = await asyncio.wait_for(
                         fetcher.get_json(endpoint, source=self.source, headers=json_headers(source=self.source), params=params, retries=0),
                         timeout=4,
                     )
-                except Exception:
+                except asyncio.TimeoutError:
+                    _conn_errors += 1
+                    blocked_reason = blocked_reason or "connection timeout on WB search API (search.wb.ru unreachable)"
+                    continue
+                except Exception as exc:
+                    _conn_errors += 1
+                    blocked_reason = blocked_reason or f"connection error: {type(exc).__name__} — WB unreachable from current IP"
                     continue
                 if resp.blocked:
                     blocked_reason = f"HTTP {resp.status_code}: blocked by Wildberries"
@@ -92,14 +99,32 @@ class WildberriesParser:
                         referer="https://www.wildberries.ru/",
                         scroll_steps=2,
                     ),
-                    timeout=7,
+                    timeout=15,
                 )
-            except Exception:
+            except asyncio.TimeoutError:
                 rendered = None
+                blocked_reason = blocked_reason or "browser fallback timeout — WB unreachable"
+            except Exception as exc:
+                rendered = None
+                blocked_reason = blocked_reason or f"browser fallback error: {type(exc).__name__}"
             if not rendered:
-                return SourceResult(self.source, "empty", errorReason=blocked_reason)
+                status = "blocked" if blocked_reason else "empty"
+                return SourceResult(
+                    self.source,
+                    status,
+                    errorReason=blocked_reason,
+                    diagnostics={
+                        "operatorAction": "configure PROXY_URL env variable to access Wildberries",
+                        "triedEndpoints": SEARCH_ENDPOINTS[:2],
+                    } if blocked_reason else {},
+                )
             if rendered.status == "blocked":
-                return SourceResult(self.source, "blocked", errorReason=rendered.errorReason or blocked_reason)
+                return SourceResult(
+                    self.source,
+                    "blocked",
+                    errorReason=rendered.errorReason or blocked_reason,
+                    diagnostics={"operatorAction": "configure PROXY_URL env variable"},
+                )
             links = extract_product_links(rendered.html, "https://www.wildberries.ru/")
             async with Fetcher() as fetcher:
                 for link in links[:limit]:
@@ -110,8 +135,8 @@ class WildberriesParser:
                         product.geo = default_geo(region)
                         product.category = category
                         items.append(product)
-        status = "ok" if items else "empty"
-        return SourceResult(self.source, status, len(items), "", items[:limit])
+        status = "ok" if items else ("blocked" if blocked_reason else "empty")
+        return SourceResult(self.source, status, len(items), blocked_reason if not items else "", items[:limit])
 
     def _from_search_product(self, p: dict, region: str, category: str) -> ProductItem | None:
         nm_id = p.get("id")

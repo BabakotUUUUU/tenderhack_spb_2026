@@ -26,7 +26,7 @@ async def _run_source(source: str, query: str, expanded: list[str], category: st
     started = time.perf_counter()
     try:
         parser = PARSERS[source]()
-        result = await asyncio.wait_for(parser.search(query, region=region, limit=limit, category=category), timeout=20)
+        result = await asyncio.wait_for(parser.search(query, region=region, limit=limit, category=category), timeout=28)
         if result.status == "empty" and source != "runet":
             for variant in expanded[1:3]:
                 result = await asyncio.wait_for(parser.search(variant, region=region, limit=limit, category=category), timeout=20)
@@ -77,7 +77,7 @@ async def search_products(query: str, category: str, region: str, limit: int = 1
         source: asyncio.create_task(_run_source(source, normalized, expanded, category, region, limit))
         for source in SOURCE_KEYS
     }
-    done, pending = await asyncio.wait(tasks.values(), timeout=30)
+    done, pending = await asyncio.wait(tasks.values(), timeout=38)
     for task in pending:
         task.cancel()
     if pending:
