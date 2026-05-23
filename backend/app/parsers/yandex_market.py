@@ -1,301 +1,176 @@
-"""
-Парсер Яндекс Маркет.
-
-Стратегии:
-  1. httpx → market.yandex.ru/search → __NEXT_DATA__ JSON
-  2. httpx → DOM-парсинг через BeautifulSoup
-  3. Playwright fallback (если httpx заблокирован)
-"""
-
-import json
-import logging
 import re
-from typing import Optional
 from urllib.parse import quote_plus
 
-from bs4 import BeautifulSoup
-
-from app.parsers.base import BaseParser, ProductItem
+from app.parsers.browser import fetch_rendered_html
+from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price, normalize_url
+from app.parsers.extractors import extract_characteristics_from_json, extract_embedded_json, extract_product_from_html, extract_product_links
 from app.parsers.http_client import Fetcher, browser_headers
 
-logger = logging.getLogger(__name__)
-
-REGION_IDS: dict[str, int] = {
-    "москва":          213,
-    "санкт-петербург": 2,
-    "спб":             2,
-    "новосибирск":     65,
-    "екатеринбург":    54,
-    "казань":          43,
-    "нижний новгород": 47,
-    "краснодар":       35,
-    "ростов-на-дону":  39,
-    "уфа":             172,
-    "самара":          51,
-    "омск":            66,
-    "default":         213,
-}
+REGION_IDS = {"москва": 213, "санкт-петербург": 2, "спб": 2, "новосибирск": 65, "екатеринбург": 54}
 
 
-def _rid(region: str) -> int:
-    return REGION_IDS.get(region.lower().strip(), REGION_IDS["default"])
+class YandexMarketParser:
+    source = "yandex_market"
 
+    async def search(self, query: str, region: str = "Москва", limit: int = 10, category: str = "") -> SourceResult:
+        rid = REGION_IDS.get((region or "").lower(), 213)
+        search_url = f"https://market.yandex.ru/search?text={quote_plus(query)}&lr={rid}"
+        items: list[ProductItem] = []
+        candidate_html = ""
 
-def _price(value) -> Optional[float]:
-    if value is None:
-        return None
-    text = re.sub(r"[^\d]", "", str(value))
-    if not text:
-        return None
-    v = float(text)
-    return v if 10 <= v <= 10_000_000 else None
+        async with Fetcher() as fetcher:
+            headers = browser_headers(source=self.source)
+            headers["Cookie"] = f"_region_id={rid}; yandex_gid={rid};"
+            resp = await fetcher.get_text(search_url, source=self.source, headers=headers, retries=1)
+            if resp.text and not resp.blocked:
+                candidate_html = resp.text
 
+            if resp.blocked:
+                rendered = await fetch_rendered_html(
+                    search_url,
+                    referer="https://market.yandex.ru/",
+                    wait_selectors=['[data-zone-name*="product" i]', "article", 'a[href*="/product"]'],
+                    scroll_steps=4,
+                )
+                if rendered.status == "blocked" and not rendered.product_payloads:
+                    return SourceResult(
+                        self.source,
+                        "blocked",
+                        errorReason="Yandex Market access restricted",
+                        diagnostics={
+                            "blockedUrl": search_url,
+                            "legalFallbacksTried": ["html", "playwright_render", "xhr_capture"],
+                            "operatorAction": "open source manually or configure PROXY_URL/PROXY_LIST",
+                        },
+                    )
+                candidate_html = rendered.html or candidate_html
+                for payload in rendered.product_payloads or rendered.json_payloads:
+                    items.extend(self._items_from_json(payload, region, category, limit - len(items)))
 
-class YandexMarketParser(BaseParser):
-    source_name = "Яндекс Маркет"
-    domain = "market.yandex.ru"
+            if not items and candidate_html:
+                items = self._items_from_html(candidate_html, search_url, region, category, limit)
 
-    async def search(self, query: str, region: str = "Москва", limit: int = 10) -> list[ProductItem]:
-        rid = _rid(region)
+            if not items:
+                items = await self._details_from_links(fetcher, extract_product_links(candidate_html, search_url), region, category, limit)
+            else:
+                for idx, item in enumerate(items[: min(limit, 5)]):
+                    detail = await self._detail(fetcher, item.url, region, category)
+                    items[idx] = merge_product_data(item, detail)
 
-        results = await self._search_httpx(query, rid, limit)
-        if results:
-            return results[:limit]
+        items = self._dedupe(items)[:limit]
+        return SourceResult(self.source, "ok" if items else "empty", len(items), "", items)
 
-        # httpx заблокирован (IP flagged as VPN) — Playwright тоже не пробивает без прокси
-        logger.warning("[YM] httpx blocked, skipping Playwright (need proxy)")
-        return []
+    def _items_from_html(self, html: str, base_url: str, region: str, category: str, limit: int) -> list[ProductItem]:
+        items: list[ProductItem] = []
+        for data in extract_embedded_json(html):
+            items.extend(self._items_from_json(data, region, category, limit - len(items)))
+            if len(items) >= limit:
+                return self._dedupe(items)
+        for link in extract_product_links(html, base_url)[:limit]:
+            title = re.sub(r"[-_]+", " ", link.rstrip("/").split("/")[-1])[:160]
+            items.append(ProductItem(source=self.source, realSourceHost="market.yandex.ru", title=title, url=link, region=region, category=category, geo=default_geo(region)))
+        return self._dedupe(items)
 
-    # ── httpx ────────────────────────────────────────────────────────────────
-
-    async def _search_httpx(self, query: str, rid: int, limit: int) -> list[ProductItem]:
-        headers = browser_headers("https://market.yandex.ru/")
-        headers["Cookie"] = f"_region_id={rid}; yandex_gid={rid}; my=YycCAAA=; i=abc;"
-        headers["Sec-Fetch-Site"] = "same-origin"
-
-        async with Fetcher(timeout=12.0, connect_timeout=5.0) as f:
-            html = await f.get_text(
-                "https://market.yandex.ru/search",
-                params={"text": query, "lr": rid},
-                headers=headers,
-                retries=0,  # одна попытка — 403 означает IP-блок, Playwright быстрее
-                return_on_status={403},
-            )
-
-        if not html:
-            return []
-
-        # Проверяем: это нормальная страница или антибот-страница?
-        if "VPN" in html or "antibot" in html.lower() or len(html) < 5_000:
-            logger.info("[YM] httpx blocked (antibot/VPN), skipping to Playwright")
-            return []
-
-        results = self._from_next_data(html, limit)
-        if results:
-            logger.info(f"[YM] __NEXT_DATA__: {len(results)} items")
-            return results
-
-        results = self._from_dom(html, limit)
-        if results:
-            logger.info(f"[YM] DOM: {len(results)} items")
-        return results
-
-    # ── __NEXT_DATA__ ─────────────────────────────────────────────────────────
-
-    def _from_next_data(self, html: str, limit: int) -> list[ProductItem]:
-        m = re.search(
-            r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
-            html, re.DOTALL,
-        )
-        if not m:
-            return []
-        try:
-            data = json.loads(m.group(1))
-        except Exception:
-            return []
-
-        results: list[ProductItem] = []
+    def _items_from_json(self, data, region: str, category: str, limit: int) -> list[ProductItem]:
+        out: list[ProductItem] = []
         for node in self._walk(data):
-            p = self._from_node(node)
-            if p:
-                results.append(p)
-            if len(results) >= limit:
+            title = node.get("title") or node.get("name") or node.get("modelName")
+            url = node.get("url") or node.get("productUrl") or node.get("navnodeUrl") or node.get("link")
+            product_id = node.get("id") or node.get("modelId") or node.get("skuId") or node.get("wareId")
+            if not url and product_id:
+                url = f"https://market.yandex.ru/product/{product_id}"
+            price = normalize_price(node.get("price") or node.get("priceValue") or node.get("value"))
+            if title and url:
+                image = self._image(node)
+                vendor = node.get("vendor") if isinstance(node.get("vendor"), dict) else {}
+                out.append(ProductItem(
+                    source=self.source,
+                    sourceType="marketplace",
+                    realSourceHost="market.yandex.ru",
+                    title=str(title)[:300],
+                    brand=str(node.get("brand") or vendor.get("name") or ""),
+                    productId=str(product_id or ""),
+                    price=price,
+                    images=[image] if image else [],
+                    mainImage=image or "",
+                    url=normalize_url(url, "https://market.yandex.ru/"),
+                    rating=float((node.get("ratings") or {}).get("value") if isinstance(node.get("ratings"), dict) else node.get("rating") or 0),
+                    reviewsCount=int(node.get("reviewCount") or node.get("opinionsCount") or 0),
+                    category=category,
+                    region=region,
+                    geo=default_geo(region) | {"detectedRegion": region},
+                    characteristics=extract_characteristics_from_json(node, limit=100),
+                ))
+            if len(out) >= limit:
                 break
-        return _dedupe(results)
+        return self._dedupe(out)
 
-    def _walk(self, node, depth: int = 0):
-        if depth > 15:
+    async def _details_from_links(self, fetcher: Fetcher, links: list[str], region: str, category: str, limit: int) -> list[ProductItem]:
+        items: list[ProductItem] = []
+        for link in links[:limit]:
+            detail = await self._detail(fetcher, link, region, category)
+            if detail and detail.title:
+                items.append(detail)
+        return items
+
+    async def _detail(self, fetcher: Fetcher, url: str, region: str, category: str) -> ProductItem | None:
+        if not url:
+            return None
+        resp = await fetcher.get_text(url, source=self.source, referer="https://market.yandex.ru/", retries=0)
+        if resp.blocked or not resp.text:
+            rendered = await fetch_rendered_html(
+                url,
+                referer="https://market.yandex.ru/",
+                wait_selectors=["h1", '[data-zone-name*="product" i]', "article"],
+                scroll_steps=2,
+            )
+            if rendered.status == "blocked" and not rendered.product_payloads:
+                return None
+            if rendered.product_payloads:
+                payload_items = []
+                for payload in rendered.product_payloads:
+                    payload_items.extend(self._items_from_json(payload, region, category, 1))
+                if payload_items:
+                    return payload_items[0]
+            if not rendered.html:
+                return None
+            html = rendered.html
+        else:
+            html = resp.text
+        item = extract_product_from_html(html, url, self.source)
+        item.sourceType = "marketplace"
+        item.realSourceHost = "market.yandex.ru"
+        item.region = region
+        item.category = category
+        item.geo = default_geo(region) | {k: v for k, v in item.geo.items() if v}
+        return item
+
+    def _walk(self, node, depth=0):
+        if depth > 13:
             return
         if isinstance(node, dict):
-            if self._is_product(node):
+            if any(k in node for k in ("title", "name", "modelName")) and any(k in node for k in ("id", "modelId", "skuId", "url", "productUrl", "link")):
                 yield node
-                return
-            for v in node.values():
-                yield from self._walk(v, depth + 1)
+            for value in node.values():
+                yield from self._walk(value, depth + 1)
         elif isinstance(node, list):
-            for item in node[:300]:
+            for item in node[:350]:
                 yield from self._walk(item, depth + 1)
 
-    def _is_product(self, d: dict) -> bool:
-        keys = set(d.keys())
-        has_name  = bool(keys & {"title", "name", "modelName"})
-        has_price = bool(keys & {"price", "priceValue", "offers", "wareId"})
-        has_id    = bool(keys & {"id", "offerId", "modelId", "skuId", "slug", "wareId"})
-        return has_name and (has_price or has_id)
+    def _image(self, node) -> str:
+        for key in ("picture", "image", "imageUrl", "thumbnail", "src"):
+            value = node.get(key)
+            if isinstance(value, dict):
+                value = value.get("url") or value.get("src")
+            if isinstance(value, str):
+                return normalize_url(value)
+        return ""
 
-    def _from_node(self, d: dict) -> Optional[ProductItem]:
-        title = d.get("title") or d.get("name") or d.get("modelName")
-        if not title or len(str(title)) < 3:
-            return None
-
-        price = _price(d.get("price") or d.get("priceValue"))
-        if not price:
-            offers = d.get("offers")
-            if isinstance(offers, list) and offers:
-                price = _price(offers[0].get("price") or offers[0].get("priceValue"))
-            elif isinstance(offers, dict):
-                price = _price(offers.get("price") or offers.get("min"))
-
-        url = d.get("url") or d.get("productUrl")
-        if not url:
-            pid = d.get("id") or d.get("modelId") or d.get("skuId") or d.get("slug")
-            url = f"https://market.yandex.ru/product/{pid}" if pid else None
-        if not url:
-            return None
-        if url.startswith("/"):
-            url = "https://market.yandex.ru" + url
-
-        image = d.get("picture") or d.get("image") or d.get("imageUrl") or d.get("thumbnail")
-        if isinstance(image, dict):
-            image = image.get("url") or image.get("src")
-        if image and isinstance(image, str) and image.startswith("//"):
-            image = "https:" + image
-
-        chars: dict = {}
-        vendor = d.get("vendor")
-        brand = d.get("brand") or (vendor.get("name") if isinstance(vendor, dict) else None)
-        if brand:
-            chars["Бренд"] = str(brand)
-
-        ratings = d.get("ratings")
-        rating = d.get("rating") or (ratings.get("value") if isinstance(ratings, dict) else None)
-        reviews = d.get("reviewCount") or d.get("opinionsCount") or d.get("feedbackCount")
-
-        product_id = d.get("id") or d.get("modelId") or d.get("skuId") or d.get("wareId")
-
-        return ProductItem(
-            title=str(title).strip()[:300],
-            price=price,
-            id=str(product_id) if product_id else None,
-            image_url=image,
-            product_url=url,
-            source=self.source_name,
-            domain=self.domain,
-            characteristics=chars,
-            rating=float(rating) if rating else None,
-            reviews_count=int(reviews) if reviews else None,
-        )
-
-    # ── DOM fallback ──────────────────────────────────────────────────────────
-
-    def _from_dom(self, html: str, limit: int) -> list[ProductItem]:
-        soup = BeautifulSoup(html[:600_000], "lxml")
-        results: list[ProductItem] = []
-
-        candidates = (
-            soup.find_all(attrs={"data-zone-name": "productSnippet"})
-            or soup.find_all(attrs={"data-autotest-id": re.compile(r"product", re.I)})
-            or soup.find_all("article")
-        )
-
-        for card in candidates[:limit * 2]:
-            try:
-                title_el = (
-                    card.find(attrs={"data-autotest-id": "product-name"})
-                    or card.find("h3") or card.find("h2")
-                )
-                title = title_el.get_text(strip=True) if title_el else ""
-                if not title or len(title) < 3:
-                    continue
-
-                price_el = card.find(class_=re.compile(r"price", re.I))
-                price = _price(re.sub(r"[^\d]", "", price_el.get_text()) if price_el else None)
-
-                link_el = card.find("a", href=True)
-                href = link_el["href"] if link_el else ""
-                url = href if href.startswith("http") else f"https://market.yandex.ru{href}"
-
-                img_el = card.find("img")
-                image_url = None
-                if img_el:
-                    src = img_el.get("src") or img_el.get("data-src", "")
-                    if src and src.startswith("//"):
-                        src = "https:" + src
-                    image_url = src or None
-
-                results.append(ProductItem(
-                    title=title[:300],
-                    price=price,
-                    image_url=image_url,
-                    product_url=url,
-                    source=self.source_name,
-                    domain=self.domain,
-                ))
-                if len(results) >= limit:
-                    break
-            except Exception:
-                continue
-
-        return _dedupe(results)
-
-    # ── Playwright fallback ───────────────────────────────────────────────────
-
-    async def _search_playwright(self, query: str, rid: int, limit: int) -> list[ProductItem]:
-        try:
-            from app.parsers.browser import new_page
-        except ImportError:
-            return []
-
-        page = None
-        try:
-            page = await new_page()
-            await page.context.add_cookies([
-                {"name": "_region_id", "value": str(rid),
-                 "domain": ".market.yandex.ru", "path": "/"},
-                {"name": "yandex_gid", "value": str(rid),
-                 "domain": ".yandex.ru", "path": "/"},
-            ])
-            url = f"https://market.yandex.ru/search?text={quote_plus(query)}&lr={rid}"
-            await page.goto(url, wait_until="domcontentloaded", timeout=25_000)
-            try:
-                await page.wait_for_selector(
-                    "article, [data-zone-name='productSnippet']",
-                    timeout=10_000,
-                )
-            except Exception:
-                pass
-            html = await page.content()
-            results = self._from_next_data(html, limit) or self._from_dom(html, limit)
-            if results:
-                logger.info(f"[YM] Playwright: {len(results)} items")
-            return results
-        except Exception as exc:
-            logger.warning(f"[YM Playwright] {exc}")
-            return []
-        finally:
-            if page:
-                try:
-                    await page.context.close()
-                except Exception:
-                    pass
-
-
-def _dedupe(items: list[ProductItem]) -> list[ProductItem]:
-    seen: set[str] = set()
-    out: list[ProductItem] = []
-    for item in items:
-        key = item.product_url.split("?")[0].rstrip("/")
-        if key not in seen:
-            seen.add(key)
-            out.append(item)
-    return out
+    def _dedupe(self, items: list[ProductItem]) -> list[ProductItem]:
+        seen, out = set(), []
+        for item in items:
+            key = (item.url or item.title).split("?")[0]
+            if key and key not in seen:
+                seen.add(key)
+                out.append(item)
+        return out

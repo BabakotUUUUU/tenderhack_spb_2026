@@ -1,184 +1,172 @@
-"""
-Парсер Wildberries.
+from urllib.parse import quote_plus
 
-Метод: httpx → публичный JSON-эндпоинт поиска Wildberries.
-
-search.wb.ru — это внутренний поисковый движок WB, доступный публично
-без регистрации и API-ключей. Это не "внешний поисковый API" (который
-запрещён ТЗ) — это поиск WB по каталогу самого WB, аналог ввода текста
-в строку поиска на сайте. Документация: паблик, без авторизации.
-
-Регионализация: параметр dest (разные склады → разные цены).
-"""
-
-import logging
-from typing import Optional
-
-from app.parsers.base import BaseParser, ProductItem
+from app.parsers.browser import fetch_rendered_html
+from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price
+from app.parsers.extractors import extract_characteristics_from_json, extract_product_from_html, extract_product_links
 from app.parsers.http_client import Fetcher, json_headers
 
-logger = logging.getLogger(__name__)
-
-REGION_DEST: dict[str, str] = {
-    "москва":          "-1257786",
-    "санкт-петербург": "-1275499",
-    "спб":             "-1275499",
-    "новосибирск":     "-364632",
-    "екатеринбург":    "-1198055",
-    "казань":          "-2133466",
-    "нижний новгород": "-2096398",
-    "краснодар":       "-3520000",
-    "ростов-на-дону":  "-3827144",
-    "уфа":             "-587615",
-    "самара":          "-2578754",
-    "омск":            "-3634030",
-    "default":         "-1257786",
-}
-
-# Пробуем несколько версий эндпоинта — WB периодически меняет версию
-WB_SEARCH_ENDPOINTS = [
+REGION_DEST = {"москва": "-1257786", "санкт-петербург": "-1275499", "спб": "-1275499"}
+SEARCH_ENDPOINTS = [
     "https://search.wb.ru/exactmatch/ru/common/v7/search",
-    "https://search.wb.ru/exactmatch/ru/common/v4/search",
     "https://search.wb.ru/exactmatch/ru/common/v5/search",
-    "https://search.wb.ru/exactmatch/ru/male/v5/search",
-    "https://search.wb.ru/exactmatch/ru/female/v5/search",
+    "https://search.wb.ru/exactmatch/ru/common/v4/search",
 ]
 
 
 def _dest(region: str) -> str:
-    return REGION_DEST.get(region.lower().strip(), REGION_DEST["default"])
+    return REGION_DEST.get((region or "").lower(), "-1257786")
 
 
-def _price(value) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        v = float(value)
-        if v > 10000:
-            v = v / 100
-        return v if 10 <= v <= 10_000_000 else None
-    except Exception:
-        return None
-
-
-def _image_url(nm_id: int) -> str:
-    vol  = nm_id // 100000
-    part = nm_id // 1000
-    basket = _basket(vol)
-    return f"https://basket-{basket:02d}.wbbasket.ru/vol{vol}/part{part}/{nm_id}/images/c246x328/1.webp"
-
-
-def _basket(vol: int) -> int:
-    thresholds = [143,287,431,719,1007,1061,1115,1169,1313,1601,
-                  1655,1919,2045,2189,2405,2621,2837]
-    for i, t in enumerate(thresholds, 1):
-        if vol <= t:
+def _basket(nm_id: int) -> int:
+    vol = nm_id // 100000
+    for i, threshold in enumerate([143, 287, 431, 719, 1007, 1061, 1115, 1169, 1313, 1601, 1655, 1919, 2045, 2189, 2405, 2621, 2837], 1):
+        if vol <= threshold:
             return i
     return 18
 
 
-class WildberriesParser(BaseParser):
-    source_name = "Wildberries"
-    domain = "wildberries.ru"
+def _image_urls(nm_id: int) -> list[str]:
+    vol = nm_id // 100000
+    part = nm_id // 1000
+    basket = _basket(nm_id)
+    return [
+        f"https://basket-{basket:02d}.wbbasket.ru/vol{vol}/part{part}/{nm_id}/images/c516x688/{i}.webp"
+        for i in range(1, 7)
+    ]
 
-    async def search(self, query: str, region: str = "Москва", limit: int = 10) -> list[ProductItem]:
-        import asyncio as _asyncio
-        dest = _dest(region)
+
+def _price_from_product(p: dict) -> tuple[float, float]:
+    price = old = 0.0
+    for size in p.get("sizes") or []:
+        pb = size.get("price") or {}
+        price = normalize_price(pb.get("total") or pb.get("product") or pb.get("sale"))
+        old = normalize_price(pb.get("basic") or pb.get("old"))
+        if price:
+            break
+    return price or normalize_price(p.get("salePriceU") or p.get("priceU")), old or normalize_price(p.get("priceU"))
+
+
+class WildberriesParser:
+    source = "wildberries"
+
+    async def search(self, query: str, region: str = "Москва", limit: int = 10, category: str = "") -> SourceResult:
+        items: list[ProductItem] = []
         params = {
-            "ab_testing": "false",
-            "appType":    "1",
-            "curr":       "rub",
-            "dest":       dest,
-            "query":      query,
-            "resultset":  "catalog",
-            "sort":       "popular",
-            "spp":        "30",
-            "page":       "1",
-            "lang":       "ru",
-            "suppressSpellcheck": "false",
+            "ab_testing": "false", "appType": "1", "curr": "rub", "dest": _dest(region),
+            "query": query, "resultset": "catalog", "sort": "popular", "spp": "30", "page": "1", "lang": "ru",
         }
-        headers = json_headers("https://www.wildberries.ru/")
-        headers["Origin"] = "https://www.wildberries.ru"
+        async with Fetcher() as fetcher:
+            blocked_reason = ""
+            for endpoint in SEARCH_ENDPOINTS:
+                resp = await fetcher.get_json(endpoint, source=self.source, headers=json_headers(source=self.source), params=params, retries=1)
+                if resp.blocked:
+                    blocked_reason = f"HTTP {resp.status_code}: blocked by Wildberries"
+                    continue
+                products = ((resp.json_data or {}).get("data") or {}).get("products") or []
+                for raw in products[:limit]:
+                    item = self._from_search_product(raw, region, category)
+                    if item:
+                        items.append(item)
+                if items:
+                    break
 
-        # Запускаем все эндпоинты параллельно: первый успешный ответ возвращается.
-        # connect_timeout=2.5s: если все WB-хосты блокированы — провалимся за ~3s.
-        async with Fetcher(timeout=5.0, connect_timeout=2.5) as f:
-            async def _try(endpoint: str):
-                return await f.get_json(endpoint, headers=headers, params=params, retries=0)
+            for idx, item in enumerate(items[: min(limit, 6)]):
+                detail = await self._detail(fetcher, item.productId, item.url, region, category)
+                items[idx] = merge_product_data(item, detail)
 
-            tasks = [_asyncio.create_task(_try(ep)) for ep in WB_SEARCH_ENDPOINTS[:3]]
-            data = None
-            try:
-                for coro in _asyncio.as_completed(tasks):
-                    result = await coro
-                    if result and result.get("data", {}).get("products"):
-                        data = result
-                        break
-            finally:
-                for t in tasks:
-                    t.cancel()
+        if not items:
+            rendered = await fetch_rendered_html(f"https://www.wildberries.ru/catalog/0/search.aspx?search={quote_plus(query)}", referer="https://www.wildberries.ru/")
+            if rendered.status == "blocked":
+                return SourceResult(self.source, "blocked", errorReason=rendered.errorReason or blocked_reason)
+            links = extract_product_links(rendered.html, "https://www.wildberries.ru/")
+            async with Fetcher() as fetcher:
+                for link in links[:limit]:
+                    resp = await fetcher.get_text(link, source=self.source, referer="https://www.wildberries.ru/", retries=0)
+                    if resp.text:
+                        product = extract_product_from_html(resp.text, link, self.source)
+                        product.region = region
+                        product.geo = default_geo(region)
+                        product.category = category
+                        items.append(product)
+        status = "ok" if items else "empty"
+        return SourceResult(self.source, status, len(items), "", items[:limit])
 
-        if not data:
-            logger.warning(f"[WB] 0 items for '{query}'")
-            return []
-
-        products = data.get("data", {}).get("products", [])
-        results: list[ProductItem] = []
-        for p in products:
-            item = self._parse(p)
-            if item:
-                results.append(item)
-            if len(results) >= limit:
-                break
-
-        if results:
-            logger.info(f"[WB] {len(results)} items")
-        else:
-            logger.warning(f"[WB] 0 items for '{query}'")
-        return results
-
-    def _parse(self, p: dict) -> Optional[ProductItem]:
+    def _from_search_product(self, p: dict, region: str, category: str) -> ProductItem | None:
         nm_id = p.get("id")
-        name  = p.get("name")
+        name = p.get("name")
         if not nm_id or not name:
             return None
-
-        brand = p.get("brand", "")
-        title = f"{brand} {name}".strip() if brand else name
-
-        price = None
-        for size in (p.get("sizes") or []):
-            pb = size.get("price") or {}
-            price = _price(pb.get("total") or pb.get("product") or pb.get("basic"))
-            if price:
-                break
-        if not price:
-            price = _price(p.get("priceU") or p.get("salePriceU"))
-
-        nm_int = int(nm_id)
-        chars: dict = {}
-        if brand:
-            chars["Бренд"] = brand
-        rating = p.get("reviewRating")
-        if rating:
-            chars["Рейтинг"] = str(rating)
-        feedbacks = p.get("feedbacks")
-        if feedbacks:
-            chars["Отзывы"] = str(feedbacks)
-
-        colors = p.get("colors", [])
-        if colors:
-            chars["Цвет"] = ", ".join(c.get("name", "") for c in colors[:3] if c.get("name"))
-
+        brand = p.get("brand") or ""
+        price, old = _price_from_product(p)
+        images = _image_urls(int(nm_id))
+        chars = {
+            "subject": p.get("subjectName") or "",
+            "colors": ", ".join(c.get("name", "") for c in (p.get("colors") or []) if c.get("name")),
+            "sizes": ", ".join(s.get("name", "") for s in (p.get("sizes") or []) if s.get("name")),
+        }
+        chars.update(extract_characteristics_from_json(p, limit=80))
+        chars = {k: v for k, v in chars.items() if v}
         return ProductItem(
-            title=title,
+            source=self.source,
+            sourceType="marketplace",
+            realSourceHost="wildberries.ru",
+            title=f"{brand} {name}".strip(),
+            brand=brand,
+            sku=str(nm_id),
+            productId=str(nm_id),
+            category=category or p.get("subjectName") or "",
             price=price,
-            id=str(nm_int),
-            image_url=_image_url(nm_int),
-            product_url=f"https://www.wildberries.ru/catalog/{nm_int}/detail.aspx",
-            source=self.source_name,
-            domain=self.domain,
+            oldPrice=old,
+            discountPercent=float(p.get("sale") or 0),
+            seller=p.get("supplier") or p.get("supplierName") or "",
+            rating=float(p.get("reviewRating") or 0),
+            reviewsCount=int(p.get("feedbacks") or 0),
+            images=images,
+            mainImage=images[0] if images else "",
+            url=f"https://www.wildberries.ru/catalog/{nm_id}/detail.aspx",
             characteristics=chars,
-            rating=float(rating) if rating else None,
-            reviews_count=int(feedbacks) if feedbacks else None,
+            region=region,
+            geo=default_geo(region) | {"detectedRegion": region, "deliveryRegion": region},
         )
+
+    async def _detail(self, fetcher: Fetcher, nm_id: str, url: str, region: str, category: str) -> ProductItem | None:
+        detail_url = f"https://card.wb.ru/cards/v2/detail?appType=1&curr=rub&dest={_dest(region)}&spp=30&nm={nm_id}"
+        resp = await fetcher.get_json(detail_url, source=self.source, referer="https://www.wildberries.ru/", retries=1)
+        products = (((resp.json_data or {}).get("data") or {}).get("products") or [])
+        card_meta = await self._card_metadata(fetcher, nm_id)
+        if products:
+            item = self._from_search_product(products[0], region, category)
+            if item and card_meta:
+                item.description = card_meta.get("description", "")
+                item.characteristics.update(card_meta.get("characteristics", {}))
+            return item
+        html = await fetcher.get_text(url, source=self.source, referer="https://www.wildberries.ru/", retries=0)
+        if html.text and not html.blocked:
+            item = extract_product_from_html(html.text, url, self.source)
+            if card_meta:
+                item.description = item.description or card_meta.get("description", "")
+                item.characteristics.update(card_meta.get("characteristics", {}))
+            return item
+        return None
+
+    async def _card_metadata(self, fetcher: Fetcher, nm_id: str) -> dict:
+        try:
+            nm_int = int(nm_id)
+        except Exception:
+            return {}
+        vol = nm_int // 100000
+        part = nm_int // 1000
+        basket = _basket(nm_int)
+        url = f"https://basket-{basket:02d}.wbbasket.ru/vol{vol}/part{part}/{nm_id}/info/ru/card.json"
+        resp = await fetcher.get_json(url, source=self.source, referer="https://www.wildberries.ru/", retries=0)
+        data = resp.json_data if isinstance(resp.json_data, dict) else {}
+        if not data:
+            return {}
+        chars = extract_characteristics_from_json(data, limit=100)
+        for group in data.get("grouped_options") or []:
+            for option in group.get("options") or []:
+                name = option.get("name")
+                value = option.get("value")
+                if name and value:
+                    chars[str(name)] = str(value)
+        return {"description": str(data.get("description") or ""), "characteristics": chars}

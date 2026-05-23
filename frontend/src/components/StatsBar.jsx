@@ -1,33 +1,22 @@
 import styles from './StatsBar.module.css'
 
 const SOURCE_META = {
-  'Яндекс Маркет': { color: '#ff9b00', short: 'ЯМ' },
-  'Ozon':           { color: '#005bff', short: 'OZ' },
-  'Wildberries':    { color: '#cb11ab', short: 'WB' },
-  'Интернет (Рунет)': { color: '#00b896', short: 'WEB' },
+  wildberries: { color: '#cb11ab', label: 'WB' },
+  ozon: { color: '#005bff', label: 'Ozon' },
+  yandex_market: { color: '#ff9b00', label: 'ЯМ' },
+  runet: { color: '#00b896', label: 'Рунет' },
 }
 
 const STATUS_COLORS = {
-  success: '#16a34a',
-  partial: '#d97706',
-  failed: '#dc2626',
-  timeout: '#dc2626',
-}
-
-const STATUS_LABELS = {
-  success: '',
-  partial: 'PARTIAL',
-  failed: 'FAILED',
-  timeout: 'TIMEOUT',
-}
-
-function fmtPrice(v) {
-  if (!v) return '—'
-  return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 0 }).format(v)
+  ok: '#16a34a',
+  empty: '#d97706',
+  blocked: '#dc2626',
+  error: '#dc2626',
 }
 
 export default function StatsBar({ results, activeSource, onSourceChange }) {
-  const total = results.total_items
+  const groups = Object.entries(results.groups || {}).map(([source, group]) => ({ source, ...group }))
+  const total = results.summary?.totalFound || 0
 
   return (
     <div className={styles.wrap}>
@@ -42,8 +31,10 @@ export default function StatsBar({ results, activeSource, onSourceChange }) {
         >
           Все источники
         </button>
-        {results.results.map(r => {
-          const meta = SOURCE_META[r.source] || { color: '#888', short: '?' }
+        {groups.map(r => {
+          const meta = SOURCE_META[r.source] || { color: '#888', label: r.source }
+          const prices = r.items.map(i => i.price).filter(Boolean)
+          const min = prices.length ? Math.min(...prices) : 0
           return (
             <button
               key={r.source}
@@ -51,22 +42,14 @@ export default function StatsBar({ results, activeSource, onSourceChange }) {
               onClick={() => onSourceChange(r.source)}
             >
               <span className={styles.tabDot} style={{ background: meta.color }} />
-              <span className={styles.tabName}>{r.source}</span>
-              <span className={styles.tabCount}>{r.total_found}</span>
-              {r.status && r.status !== 'success' && (
-                <span
-                  className={styles.statusBadge}
-                  style={{ color: STATUS_COLORS[r.status] || '#888' }}
-                >
-                  {STATUS_LABELS[r.status] || r.status}
+              <span className={styles.tabName}>{meta.label}</span>
+              <span className={styles.tabCount}>{r.count}</span>
+              {r.status !== 'ok' && (
+                <span className={styles.statusBadge} style={{ color: STATUS_COLORS[r.status] || '#888' }}>
+                  {r.status}
                 </span>
               )}
-              {r.price_min && (
-                <span className={styles.tabPrice}>от {fmtPrice(r.price_min)}</span>
-              )}
-              {r.price_avg && (
-                <span className={styles.tabAvg}>ср. {fmtPrice(r.price_avg)}</span>
-              )}
+              {min > 0 && <span className={styles.tabPrice}>от {fmtPrice(min)}</span>}
             </button>
           )
         })}
@@ -74,3 +57,8 @@ export default function StatsBar({ results, activeSource, onSourceChange }) {
     </div>
   )
 }
+
+function fmtPrice(v) {
+  return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 0 }).format(v)
+}
+

@@ -1,144 +1,208 @@
-"""
-Парсер неформализованных ресурсов Рунета.
-
-Архитектура (self-hosted, без внешних поисковых API):
-  1. Определяем категорию товара из запроса (шины/одежда/оргтехника)
-  2. Берём seed-сайты для этой категории
-  3. Параллельно краулим seed-сайты через собственный async-краулер
-  4. Извлекаем товары через extractor (JSON-LD → microdata → OG → heuristics)
-  5. Дополняем результатами из локального SQLite FTS5 индекса (BM25)
-  6. Все результаты — реальные страницы реальных магазинов
-
-Источник динамический: разные запросы → разные магазины в выдаче.
-Запрещённые домены (WB, Ozon, YM и крупные агрегаторы) исключены.
-"""
-
 import asyncio
-import logging
-from typing import Optional
+import re
+from urllib.parse import quote_plus, urlparse
+from xml.etree import ElementTree
 
-from app.crawler.crawler import crawl_category_seeds
-from app.crawler.extractor import ExtractedProduct
-from app.crawler.seeds import get_seeds_for_category
-from app.parsers.base import BaseParser, ProductItem
-from app.search_index.indexer import get_index_connection, index_product
-from app.search_index.db import search_fts, count_indexed
+from app.parsers.browser import fetch_rendered_html
+from app.parsers.common import ProductItem, SourceResult, default_geo
+from app.parsers.extractors import extract_product_from_html, extract_product_links
+from app.parsers.http_client import Fetcher, browser_headers
 
-logger = logging.getLogger(__name__)
+SITE_POOL = {
+    "tires": ["4tochki.ru", "autoopt.ru", "shina-guide.ru", "tyres-auto.ru"],
+    "office": ["foroffice.ru", "oldi.ru", "price.ru", "officemag.ru"],
+    "clothes": ["1click.ru", "bonprix.ru", "kari.com", "sneakerhead.ru"],
+}
 
+SEARCH_PATTERNS = [
+    "https://{host}/search/?q={q}",
+    "https://{host}/search/?text={q}",
+    "https://{host}/catalog/?q={q}",
+    "https://{host}/?s={q}",
+]
 
-def _extracted_to_product(ep: ExtractedProduct) -> ProductItem:
-    """Конвертирует ExtractedProduct в унифицированный ProductItem."""
-    chars = dict(ep.characteristics or {})
-    if ep.brand and "Бренд" not in chars:
-        chars["Бренд"] = ep.brand
-    if ep.description and "Описание" not in chars:
-        chars["Описание"] = ep.description[:100]
-
-    return ProductItem(
-        title=ep.title,
-        price=ep.price,
-        old_price=ep.old_price,
-        image_url=ep.image_url,
-        product_url=ep.url,
-        source=f"Рунет ({ep.domain})",
-        domain=ep.domain,
-        characteristics=chars,
-    )
-
-
-def _row_to_product(row: dict) -> ProductItem:
-    """Конвертирует строку из SQLite в ProductItem."""
-    import json
-    chars = {}
-    try:
-        chars = json.loads(row.get("characteristics_json") or "{}")
-    except Exception:
-        pass
-
-    domain = row.get("domain", "")
-    return ProductItem(
-        title=row.get("title", ""),
-        price=row.get("price"),
-        old_price=row.get("old_price"),
-        image_url=row.get("image_url"),
-        product_url=row.get("url", ""),
-        source=row.get("source_label") or f"Рунет ({domain})",
-        domain=domain,
-        characteristics=chars,
-    )
+ADAPTERS = {
+    "4tochki.ru": {
+        "search": ["https://4tochki.ru/search/?q={q}", "https://4tochki.ru/catalog/tyres/?q={q}"],
+        "allow": ["/catalog/tires/", "/catalog/tyres/", "/products/tyres/", "/tyres/"],
+    },
+    "foroffice.ru": {
+        "search": ["https://www.foroffice.ru/search/?q={q}", "https://foroffice.ru/search/?q={q}"],
+        "allow": ["/products/", "/catalog/"],
+    },
+    "oldi.ru": {
+        "search": ["https://www.oldi.ru/search/?text={q}", "https://oldi.ru/search/?text={q}"],
+        "allow": ["/catalog/element/", "/catalog/"],
+    },
+    "price.ru": {
+        "search": ["https://price.ru/search/?query={q}", "https://price.ru/search/?q={q}"],
+        "allow": ["/product/", "/offers/"],
+    },
+}
 
 
-class RunetParser(BaseParser):
-    source_name = "Интернет (Рунет)"
-    domain = "runet-crawler"
+class RunetParser:
+    source = "runet"
 
-    async def search(
-        self, query: str, region: str = "Москва", limit: int = 8
-    ) -> list[ProductItem]:
-        from app.nlp.query_processor import _detect_category
+    async def search(self, query: str, region: str = "Москва", limit: int = 10, category: str = "tires") -> SourceResult:
+        hosts = SITE_POOL.get(category, SITE_POOL["tires"])
+        per_host = max(1, limit // max(1, len(hosts)) + 1)
+        async with Fetcher() as fetcher:
+            tasks = [self._search_host(fetcher, host, query, region, category, per_host) for host in hosts]
+            chunks = await asyncio.gather(*tasks, return_exceptions=True)
+        items: list[ProductItem] = []
+        for chunk in chunks:
+            if isinstance(chunk, list):
+                items.extend(chunk)
+        items = self._dedupe(items)[:limit]
+        return SourceResult(self.source, "ok" if items else "empty", len(items), "", items)
 
-        category = _detect_category(query)
-        logger.info(f"[Runet] Query='{query}', category={category}, limit={limit}")
-
-        results: list[ProductItem] = []
-        seen_urls: set[str] = set()
-
-        def _add(product: ProductItem) -> None:
-            url = product.product_url
-            if url and url not in seen_urls and len(results) < limit:
-                seen_urls.add(url)
-                results.append(product)
-
-        # ── Шаг 1: запрос к локальному SQLite FTS5 индексу ──────────────
-        try:
-            conn = get_index_connection()
-            total_indexed = count_indexed(conn)
-            logger.info(f"[Runet] Index has {total_indexed} pages")
-
-            if total_indexed > 0:
-                rows = search_fts(conn, query, category=category, limit=limit)
-                for row in rows:
-                    if row.get("price"):  # только с ценой
-                        _add(_row_to_product(row))
-                logger.info(f"[Runet] Index returned {len(results)} items")
-        except Exception as exc:
-            logger.warning(f"[Runet] Index search failed: {exc}")
-
-        # ── Шаг 2: живой краулинг seed-сайтов ────────────────────────────
-        # Всегда делаем live crawl, чтобы обновлять индекс и получать свежие цены
-        remaining = limit - len(results)
-        if remaining > 0:
-            seeds = get_seeds_for_category(category)
-            crawled_products: list[ExtractedProduct] = []
-
-            def on_extracted(ep: ExtractedProduct) -> None:
-                crawled_products.append(ep)
-
-            try:
-                await asyncio.wait_for(
-                    crawl_category_seeds(
-                        seeds=seeds[:2],           # не более 2 seeds за раз
-                        query=query,
-                        on_product=on_extracted,
-                        max_total=remaining + 2,
-                        max_concurrent_seeds=1,    # последовательно чтобы не перегружать сайт
-                    ),
-                    timeout=22.0,  # жёсткий потолок для краулера
+    async def _search_host(self, fetcher: Fetcher, host: str, query: str, region: str, category: str, limit: int) -> list[ProductItem]:
+        items: list[ProductItem] = []
+        q = quote_plus(query)
+        html = ""
+        base_url = f"https://{host}/"
+        adapter = ADAPTERS.get(host, {})
+        links: list[str] = []
+        patterns = adapter.get("search") or SEARCH_PATTERNS
+        for pattern in patterns:
+            url = pattern.format(host=host, q=q)
+            resp = await fetcher.get_text(url, source=self.source, headers=browser_headers(referer=base_url, source=self.source), retries=0)
+            if resp.blocked:
+                rendered = await fetch_rendered_html(
+                    url,
+                    referer=base_url,
+                    wait_selectors=['a[href*="/catalog/"]', 'a[href*="/product"]', ".product", ".item"],
+                    scroll_steps=3,
                 )
-            except asyncio.TimeoutError:
-                logger.warning("[Runet] crawl timeout, using partial results")
+                html = rendered.html if rendered.status != "blocked" else ""
+            else:
+                html = resp.text
+            links = self._filter_links(extract_product_links(html, url), host, adapter)
+            if links:
+                break
+        if not links:
+            links = await self._discover_links_from_sitemaps(fetcher, host, query, category, limit * 4)
+        for link in links[: limit * 2]:
+            detail = await fetcher.get_text(link, source=self.source, referer=base_url, retries=0)
+            detail_html = detail.text
+            if detail.blocked or not detail_html:
+                rendered = await fetch_rendered_html(link, referer=base_url, wait_selectors=["h1", ".product", ".price"], scroll_steps=2)
+                if rendered.status == "blocked" or not rendered.html:
+                    continue
+                detail_html = rendered.html
+            item = extract_product_from_html(detail_html, link, self.source)
+            if not item.title and not item.price:
+                continue
+            item.source = self.source
+            item.sourceType = "runet"
+            item.realSourceHost = urlparse(link).netloc
+            item.category = category
+            item.region = region
+            item.geo = default_geo(region) | {k: v for k, v in item.geo.items() if v}
+            self._enrich_geo_availability(item, detail_html, region)
+            items.append(item)
+            if len(items) >= limit:
+                break
+        return items
 
-            # Индексируем найденное и добавляем в результаты
-            for ep in crawled_products:
-                if ep.title and ep.price:
-                    index_product(ep, category=category)
-                    item = _extracted_to_product(ep)
-                    _add(item)
+    async def _discover_links_from_sitemaps(self, fetcher: Fetcher, host: str, query: str, category: str, limit: int) -> list[str]:
+        sitemap_urls = [f"https://{host}/sitemap.xml", f"https://{host}/sitemap_index.xml"]
+        robots = await fetcher.get_text(f"https://{host}/robots.txt", source=self.source, retries=0)
+        if robots.text:
+            for match in re.findall(r"(?im)^sitemap:\s*(\S+)", robots.text):
+                if match not in sitemap_urls:
+                    sitemap_urls.append(match.strip())
 
-            logger.info(
-                f"[Runet] Live crawl found {len(crawled_products)} products, "
-                f"added {len(results)} total"
-            )
+        found: list[str] = []
+        query_tokens = [t.lower() for t in re.findall(r"[a-zа-яё0-9]+", query, re.I) if len(t) > 2]
+        category_hints = {
+            "tires": ("shin", "tyre", "tire", "шины", "rezin", "catalog"),
+            "office": ("printer", "mfu", "office", "орг", "canon", "hp", "catalog"),
+            "clothes": ("odezh", "clothes", "kurt", "futbol", "sneaker", "catalog"),
+        }.get(category, ("product", "catalog"))
 
-        return results[:limit]
+        seen_sitemaps: set[str] = set()
+        queue = sitemap_urls[:8]
+        while queue and len(found) < limit:
+            sitemap = queue.pop(0)
+            if sitemap in seen_sitemaps:
+                continue
+            seen_sitemaps.add(sitemap)
+            resp = await fetcher.get_text(sitemap, source=self.source, retries=0)
+            if not resp.text or resp.blocked:
+                continue
+            urls = self._parse_sitemap_urls(resp.text)
+            nested = [u for u in urls if "sitemap" in u.lower() and u not in seen_sitemaps]
+            queue.extend(nested[:10])
+            for url in urls:
+                lower = url.lower()
+                if urlparse(url).netloc and not urlparse(url).netloc.endswith(host):
+                    continue
+                if not any(hint in lower for hint in category_hints):
+                    continue
+                if query_tokens and not any(token in lower for token in query_tokens):
+                    # Keep category matches too, but prefer query-like URLs.
+                    if len(found) > limit // 2:
+                        continue
+                if url not in found:
+                    found.append(url)
+                if len(found) >= limit:
+                    break
+        return found[:limit]
+
+    def _parse_sitemap_urls(self, xml_text: str) -> list[str]:
+        urls: list[str] = []
+        try:
+            root = ElementTree.fromstring(xml_text.encode("utf-8"))
+            for loc in root.iter():
+                if loc.tag.lower().endswith("loc") and loc.text:
+                    urls.append(loc.text.strip())
+        except Exception:
+            urls.extend(re.findall(r"<loc>\s*(.*?)\s*</loc>", xml_text, re.I | re.S))
+        return urls[:1000]
+
+    def _filter_links(self, links: list[str], host: str, adapter: dict) -> list[str]:
+        allow = adapter.get("allow") or []
+        out: list[str] = []
+        for link in links:
+            parsed = urlparse(link)
+            if not parsed.netloc.endswith(host):
+                continue
+            if allow and not any(part in parsed.path for part in allow):
+                continue
+            if link not in out:
+                out.append(link)
+        return out
+
+    def _enrich_geo_availability(self, item: ProductItem, html: str, region: str) -> None:
+        text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html or " ")).strip()
+        lower = text.lower()
+        if not item.availability:
+            if any(marker in lower for marker in ("в наличии", "есть в наличии", "доступно", "на складе")):
+                item.availability = "in_stock"
+            elif any(marker in lower for marker in ("нет в наличии", "под заказ", "ожидается")):
+                item.availability = "limited_or_out_of_stock"
+        if not item.deliveryInfo:
+            delivery = re.search(r"(доставк[а-яё\s]{0,30}(?:сегодня|завтра|от\s+\d+|[0-9]+\s*дн)[^.!?]{0,120})", text, re.I)
+            if delivery:
+                item.deliveryInfo = delivery.group(1).strip()
+        address = re.search(r"((?:г\.?\s*)?(?:Москва|Санкт-Петербург|Новосибирск|Екатеринбург|Казань)[^.!?]{0,140}(?:ул\.|улица|пр-т|проспект|шоссе|д\.|дом)[^.!?]{0,160})", text, re.I)
+        if address:
+            item.geo["storeAddress"] = address.group(1).strip()
+            item.geo["pickupAddress"] = item.geo.get("pickupAddress") or address.group(1).strip()
+        if region and not item.geo.get("deliveryRegion"):
+            item.geo["deliveryRegion"] = region
+        city = re.search(r"(Москва|Санкт-Петербург|Новосибирск|Екатеринбург|Казань|Краснодар|Самара|Уфа)", text, re.I)
+        if city:
+            item.geo["detectedRegion"] = city.group(1)
+            item.geo["city"] = city.group(1)
+
+    def _dedupe(self, items: list[ProductItem]) -> list[ProductItem]:
+        seen, out = set(), []
+        for item in items:
+            key = (item.url or f"{item.realSourceHost}:{item.title}").split("?")[0]
+            if key and key not in seen:
+                seen.add(key)
+                out.append(item)
+        return out

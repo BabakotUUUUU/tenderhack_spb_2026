@@ -1,148 +1,177 @@
-"""Общий HTTP-клиент для всех парсеров."""
-
 import asyncio
 import logging
 import os
 import random
-from typing import Any, Optional
+import time
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
+from app.parsers.common import detect_blocked_page
+
 logger = logging.getLogger(__name__)
 
-# Если задан PROXY_URL — все запросы идут через прокси.
-# Пример: PROXY_URL=http://user:pass@proxy-host:8080
-PROXY_URL: Optional[str] = os.getenv("PROXY_URL")
-
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
 ]
 
+REFERERS = {
+    "wildberries": "https://www.wildberries.ru/",
+    "ozon": "https://www.ozon.ru/",
+    "yandex_market": "https://market.yandex.ru/",
+    "runet": "https://www.google.com/",
+}
 
-def browser_headers(referer: str = "") -> dict[str, str]:
-    h = {
+
+@dataclass
+class FetchResponse:
+    url: str
+    status_code: int = 0
+    text: str = ""
+    json_data: Any = None
+    blocked: bool = False
+    error: str = ""
+    elapsed_ms: int = 0
+
+
+class DomainRateLimiter:
+    def __init__(self, min_delay: float = 0.7):
+        self.min_delay = min_delay
+        self._last: dict[str, float] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def wait(self, domain: str) -> None:
+        lock = self._locks.setdefault(domain, asyncio.Lock())
+        async with lock:
+            now = time.monotonic()
+            pause = self.min_delay - (now - self._last.get(domain, 0))
+            if pause > 0:
+                await asyncio.sleep(pause + random.uniform(0.05, 0.25))
+            self._last[domain] = time.monotonic()
+
+
+rate_limiter = DomainRateLimiter()
+
+
+def _proxy_config() -> str | None:
+    proxy_url = os.getenv("PROXY_URL")
+    if proxy_url:
+        return proxy_url
+    proxy_list = [p.strip() for p in os.getenv("PROXY_LIST", "").split(",") if p.strip()]
+    return random.choice(proxy_list) if proxy_list else None
+
+
+def browser_headers(referer: str = "", source: str = "") -> dict[str, str]:
+    return {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
         "Accept-Encoding": "gzip, deflate, br",
+        "Referer": referer or REFERERS.get(source, "https://www.google.com/"),
         "DNT": "1",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124"',
-        "Sec-CH-UA-Mobile": "?0",
-        "Sec-CH-UA-Platform": '"Windows"',
     }
-    if referer:
-        h["Referer"] = referer
-    return h
 
 
-def json_headers(referer: str = "") -> dict[str, str]:
-    h = {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "DNT": "1",
-        "Connection": "keep-alive",
-    }
-    if referer:
-        h["Referer"] = referer
-    return h
-
-
-def _make_client(timeout: float, connect_timeout: Optional[float] = None) -> httpx.AsyncClient:
-    """Создаёт httpx-клиент с опциональным прокси."""
-    connect = connect_timeout if connect_timeout is not None else min(5.0, timeout)
-    timeout_cfg = httpx.Timeout(timeout, connect=connect, read=timeout, write=5.0, pool=5.0)
-    kwargs: dict[str, Any] = {
-        "timeout": timeout_cfg,
-        "follow_redirects": True,
-        "http2": False,
-    }
-    if PROXY_URL:
-        kwargs["proxy"] = PROXY_URL
-    return httpx.AsyncClient(**kwargs)
+def json_headers(referer: str = "", source: str = "") -> dict[str, str]:
+    headers = browser_headers(referer, source)
+    headers["Accept"] = "application/json, text/plain, */*"
+    return headers
 
 
 class Fetcher:
-    def __init__(self, timeout: float = 15.0, connect_timeout: Optional[float] = None):
-        self.client = _make_client(timeout, connect_timeout)
-
-    async def get_json(
-        self,
-        url: str,
-        *,
-        headers: Optional[dict] = None,
-        params: Optional[dict[str, Any]] = None,
-        retries: int = 2,
-    ) -> Optional[dict]:
-        for attempt in range(retries + 1):
-            try:
-                await asyncio.sleep(random.uniform(0.3, 1.0))
-                r = await self.client.get(url, headers=headers, params=params)
-                if r.status_code == 200:
-                    return r.json()
-                if r.status_code in (403, 429, 503):
-                    logger.info("[HTTP] %s for %s", r.status_code, url)
-                    if attempt < retries:
-                        await asyncio.sleep(2 ** attempt * 2)
-                    continue
-                logger.info("[HTTP] %s for %s", r.status_code, url)
-            except (httpx.ConnectTimeout, httpx.ConnectError):
-                logger.info("[HTTP] connect failed for %s", url)
-                return None  # сразу выходим — повторы не помогут
-            except Exception:
-                logger.info("[HTTP] request failed for %s", url, exc_info=True)
-                if attempt < retries:
-                    await asyncio.sleep(2 ** attempt)
-        return None
+    def __init__(self):
+        proxy = _proxy_config()
+        kwargs: dict[str, Any] = {
+            "timeout": httpx.Timeout(20.0, connect=5.0, read=12.0, write=5.0, pool=5.0),
+            "follow_redirects": True,
+            "headers": browser_headers(),
+            "http2": False,
+        }
+        if proxy:
+            kwargs["proxy"] = proxy
+        self.client = httpx.AsyncClient(**kwargs)
 
     async def get_text(
         self,
         url: str,
         *,
-        headers: Optional[dict] = None,
-        params: Optional[dict[str, Any]] = None,
+        source: str = "",
+        headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
         retries: int = 2,
-        return_on_status: Optional[set[int]] = None,
-    ) -> Optional[str]:
-        """
-        Возвращает текст страницы.
-        return_on_status — вернуть тело даже при этих кодах ответа
-        (например {403} чтобы попробовать разобрать антибот-страницу).
-        """
-        for attempt in range(retries + 1):
-            try:
-                await asyncio.sleep(random.uniform(0.3, 1.0))
-                r = await self.client.get(url, headers=headers, params=params)
-                if r.status_code == 200:
-                    return r.text
-                if return_on_status and r.status_code in return_on_status:
-                    return r.text
-                if r.status_code in (403, 429, 503):
-                    logger.info("[HTTP] %s for %s", r.status_code, url)
-                    if attempt < retries:
-                        await asyncio.sleep(2 ** attempt * 2)
-                    continue
-                logger.info("[HTTP] %s for %s", r.status_code, url)
-            except (httpx.ConnectTimeout, httpx.ConnectError):
-                logger.info("[HTTP] connect failed for %s", url)
-                return None  # сразу выходим
-            except Exception:
-                logger.info("[HTTP] request failed for %s", url, exc_info=True)
-                if attempt < retries:
-                    await asyncio.sleep(2 ** attempt)
-        return None
+        referer: str = "",
+    ) -> FetchResponse:
+        return await self._request("GET", url, source=source, headers=headers, params=params, retries=retries, referer=referer)
 
-    async def close(self):
+    async def get_json(
+        self,
+        url: str,
+        *,
+        source: str = "",
+        headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+        retries: int = 2,
+        referer: str = "",
+    ) -> FetchResponse:
+        resp = await self._request("GET", url, source=source, headers=headers, params=params, retries=retries, referer=referer)
+        if resp.text and resp.json_data is None:
+            try:
+                resp.json_data = httpx.Response(200, content=resp.text).json()
+            except Exception:
+                pass
+        return resp
+
+    async def _request(self, method: str, url: str, **kwargs: Any) -> FetchResponse:
+        source = kwargs.get("source", "")
+        headers = kwargs.get("headers") or browser_headers(kwargs.get("referer", ""), source)
+        params = kwargs.get("params")
+        retries = min(int(kwargs.get("retries", 2)), 2)
+        domain = urlparse(url).netloc or "unknown"
+        last = FetchResponse(url=url)
+
+        for attempt in range(retries + 1):
+            started = time.perf_counter()
+            try:
+                await rate_limiter.wait(domain)
+                response = await self.client.request(method, url, headers=headers, params=params)
+                text = response.text or ""
+                last = FetchResponse(
+                    url=str(response.url),
+                    status_code=response.status_code,
+                    text=text,
+                    blocked=detect_blocked_page(text[:80_000], response.status_code),
+                    elapsed_ms=int((time.perf_counter() - started) * 1000),
+                )
+                ctype = response.headers.get("content-type", "")
+                if "json" in ctype:
+                    try:
+                        last.json_data = response.json()
+                    except Exception:
+                        pass
+                if response.status_code < 400 and not last.blocked:
+                    return last
+                if response.status_code not in {403, 408, 429, 500, 502, 503, 504}:
+                    return last
+                if attempt < retries:
+                    await asyncio.sleep((2 ** attempt) + random.uniform(0.2, 0.8))
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
+                last = FetchResponse(url=url, blocked=False, error=exc.__class__.__name__, elapsed_ms=int((time.perf_counter() - started) * 1000))
+                if attempt < retries:
+                    await asyncio.sleep((2 ** attempt) + random.uniform(0.2, 0.8))
+            except Exception as exc:
+                logger.info("[HTTP] request failed: %s %s", url, exc)
+                last = FetchResponse(url=url, error=str(exc), elapsed_ms=int((time.perf_counter() - started) * 1000))
+                break
+        return last
+
+    async def close(self) -> None:
         await self.client.aclose()
 
     async def __aenter__(self):
@@ -150,3 +179,4 @@ class Fetcher:
 
     async def __aexit__(self, *_):
         await self.close()
+

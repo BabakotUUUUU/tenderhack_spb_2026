@@ -1,367 +1,227 @@
-"""
-Парсер Ozon.
-
-Метод: httpx → страница поиска ozon.ru/search/ → извлечение
-embedded JSON из script-тегов (window.__NUXT__, application/json).
-Дополнительно: DOM-парсинг через BeautifulSoup как fallback.
-
-Если httpx получает 403 (антибот) — сразу переходим к Playwright.
-
-Не использует никаких API-эндпоинтов с ключами.
-"""
-
-import json
-import logging
 import re
-from typing import Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
-from bs4 import BeautifulSoup
-
-from app.parsers.base import BaseParser, ProductItem
+from app.parsers.browser import fetch_rendered_html
+from app.parsers.common import ProductItem, SourceResult, default_geo, merge_product_data, normalize_price, normalize_url
+from app.parsers.extractors import extract_characteristics_from_json, extract_embedded_json, extract_product_from_html, extract_product_links
 from app.parsers.http_client import Fetcher, browser_headers
 
-logger = logging.getLogger(__name__)
 
-_PRICE_RE = re.compile(r"(\d[\d\s ]{1,10})\s*₽")
+class OzonParser:
+    source = "ozon"
 
+    async def search(self, query: str, region: str = "Москва", limit: int = 10, category: str = "") -> SourceResult:
+        search_url = f"https://www.ozon.ru/search/?text={quote_plus(query)}&from_global=true"
+        items: list[ProductItem] = []
+        candidate_html = ""
 
-def _price(value) -> Optional[float]:
-    if value is None:
-        return None
-    text = str(value)
-    m = _PRICE_RE.search(text)
-    if m:
-        text = m.group(1)
-    text = re.sub(r"[^\d]", "", text)
-    if not text:
-        return None
-    v = float(text)
-    return v if 10 <= v <= 10_000_000 else None
+        async with Fetcher() as fetcher:
+            composer = await self._composer_search(fetcher, query)
+            if composer:
+                items = self._items_from_json(composer, region, category, limit)
 
+            resp = await fetcher.get_text(search_url, source=self.source, headers=browser_headers(source=self.source), retries=1)
+            if resp.text and not resp.blocked:
+                candidate_html = resp.text
 
-class OzonParser(BaseParser):
-    source_name = "Ozon"
-    domain = "ozon.ru"
+            if not items and resp.blocked:
+                rendered = await fetch_rendered_html(
+                    search_url,
+                    referer="https://www.ozon.ru/",
+                    wait_selectors=['a[href*="/product/"]', '[data-widget*="searchResults" i]'],
+                    scroll_steps=4,
+                )
+                if rendered.status == "blocked" and not rendered.product_payloads:
+                    return SourceResult(
+                        self.source,
+                        "blocked",
+                        errorReason="Ozon anti-bot or CAPTCHA",
+                        diagnostics={
+                            "blockedUrl": search_url,
+                            "legalFallbacksTried": ["composer_json", "html", "playwright_render", "xhr_capture"],
+                            "operatorAction": "open source manually or configure PROXY_URL/PROXY_LIST",
+                        },
+                    )
+                candidate_html = rendered.html or candidate_html
+                for payload in rendered.product_payloads or rendered.json_payloads:
+                    items.extend(self._items_from_json(payload, region, category, limit - len(items)))
+                if not items and candidate_html:
+                    items = self._items_from_html(candidate_html, search_url, region, category, limit)
+            elif not items and candidate_html:
+                items = self._items_from_html(candidate_html, search_url, region, category, limit)
 
-    async def search(self, query: str, region: str = "Москва", limit: int = 10) -> list[ProductItem]:
-        headers = browser_headers("https://www.ozon.ru/")
-        headers["Cookie"] = "guest=1; ab_id=1;"
-        params  = {"text": query, "from_global": "true"}
-
-        html: Optional[str] = None
-        got_403 = False
-
-        async with Fetcher(timeout=14.0, connect_timeout=5.0) as f:
-            raw = await f.get_text(
-                "https://www.ozon.ru/search/",
-                headers=headers,
-                params=params,
-                retries=0,  # одна попытка — если 403, сразу Playwright
-                return_on_status={403},
-            )
-
-        if raw and len(raw) > 10_000:
-            # Пробуем извлечь данные даже из 403-страницы
-            results = self._from_embedded(raw, limit)
-            if results:
-                logger.info(f"[Ozon] embedded JSON (first try): {len(results)} items")
-                return results
-            results = self._from_dom(raw, limit)
-            if results:
-                logger.info(f"[Ozon] DOM (first try): {len(results)} items")
-                return results
-            # Страница явно антибот (маленький JS-чекер) — идём в Playwright
-            if "antibot" in raw.lower() or "challenge" in raw.lower() or len(raw) < 50_000:
-                got_403 = True
-                html = None
+            if not items:
+                links = extract_product_links(candidate_html, search_url)
+                items = await self._details_from_links(fetcher, links, region, category, limit)
             else:
-                html = raw
+                for idx, item in enumerate(items[: min(limit, 5)]):
+                    detail = await self._detail(fetcher, item.url, region, category)
+                    items[idx] = merge_product_data(item, detail)
+
+        items = self._dedupe(items)[:limit]
+        return SourceResult(self.source, "ok" if items else "empty", len(items), "", items)
+
+    async def _composer_search(self, fetcher: Fetcher, query: str) -> dict | list | None:
+        encoded_path = quote_plus(f"/search/?text={query}&from_global=true")
+        endpoints = [
+            f"https://www.ozon.ru/api/composer-api.bx/page/json/v2?url={encoded_path}",
+            f"https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=/search/?text={quote_plus(query)}&from_global=true",
+        ]
+        headers = browser_headers("https://www.ozon.ru/", self.source)
+        headers["Accept"] = "application/json, text/plain, */*"
+        for endpoint in endpoints:
+            resp = await fetcher.get_json(endpoint, source=self.source, headers=headers, retries=1)
+            if resp.json_data and not resp.blocked:
+                return resp.json_data
+        return None
+
+    def _items_from_html(self, html: str, base_url: str, region: str, category: str, limit: int) -> list[ProductItem]:
+        items: list[ProductItem] = []
+        for data in extract_embedded_json(html):
+            items.extend(self._items_from_json(data, region, category, limit - len(items)))
+            if len(items) >= limit:
+                return self._dedupe(items)
+        for link in extract_product_links(html, base_url)[:limit]:
+            path_parts = [p for p in urlparse(link).path.split("/") if p]
+            title = re.sub(r"[-_]+", " ", path_parts[-2] if len(path_parts) > 1 else path_parts[-1] if path_parts else "")
+            items.append(ProductItem(source=self.source, realSourceHost="ozon.ru", title=title, url=link, region=region, category=category, geo=default_geo(region)))
+        return self._dedupe(items)
+
+    def _items_from_json(self, data, region: str, category: str, limit: int) -> list[ProductItem]:
+        out: list[ProductItem] = []
+        for node in self._walk(data):
+            title = node.get("title") or node.get("name") or self._text(node)
+            link = self._link(node)
+            price = self._price(node)
+            if title and link and (price or "/product/" in link):
+                url = normalize_url(link, "https://www.ozon.ru/")
+                image = self._image(node)
+                out.append(ProductItem(
+                    source=self.source,
+                    sourceType="marketplace",
+                    realSourceHost="ozon.ru",
+                    title=str(title)[:300],
+                    productId=str(node.get("id") or node.get("sku") or node.get("skuId") or ""),
+                    price=price,
+                    oldPrice=normalize_price(node.get("oldPrice") or node.get("originalPrice")),
+                    images=[image] if image else [],
+                    mainImage=image or "",
+                    url=url,
+                    brand=str(node.get("brand") or ""),
+                    seller=str(node.get("seller") or ""),
+                    category=category,
+                    region=region,
+                    geo=default_geo(region) | {"detectedRegion": region},
+                    characteristics=extract_characteristics_from_json(node, limit=100),
+                ))
+            if len(out) >= limit:
+                break
+        return self._dedupe(out)
+
+    async def _details_from_links(self, fetcher: Fetcher, links: list[str], region: str, category: str, limit: int) -> list[ProductItem]:
+        items: list[ProductItem] = []
+        for link in links[:limit]:
+            detail = await self._detail(fetcher, link, region, category)
+            if detail and detail.title:
+                items.append(detail)
+        return items
+
+    async def _detail(self, fetcher: Fetcher, url: str, region: str, category: str) -> ProductItem | None:
+        if not url:
+            return None
+        resp = await fetcher.get_text(url, source=self.source, referer="https://www.ozon.ru/", retries=0)
+        if resp.blocked or not resp.text:
+            rendered = await fetch_rendered_html(
+                url,
+                referer="https://www.ozon.ru/",
+                wait_selectors=["h1", '[data-widget*="webProduct" i]', '[data-widget*="raShowcase" i]'],
+                scroll_steps=2,
+            )
+            if rendered.status == "blocked" and not rendered.product_payloads:
+                return None
+            if rendered.product_payloads:
+                payload_items = []
+                for payload in rendered.product_payloads:
+                    payload_items.extend(self._items_from_json(payload, region, category, 1))
+                if payload_items:
+                    return payload_items[0]
+            if not rendered.html:
+                return None
+            html = rendered.html
         else:
-            got_403 = True
+            html = resp.text
+        item = extract_product_from_html(html, url, self.source)
+        item.sourceType = "marketplace"
+        item.realSourceHost = "ozon.ru"
+        item.region = region
+        item.category = category
+        item.geo = default_geo(region) | {k: v for k, v in item.geo.items() if v}
+        return item
 
-        if got_403 or not html:
-            logger.warning("[Ozon] httpx blocked (antibot), no proxy configured — skipping")
-            return []
-
-        if html:
-            results = self._from_embedded(html, limit)
-            if results:
-                logger.info(f"[Ozon] embedded JSON: {len(results)} items")
-                return results
-            results = self._from_dom(html, limit)
-            if results:
-                logger.info(f"[Ozon] DOM: {len(results)} items")
-                return results
-
-        logger.warning(f"[Ozon] 0 items for '{query}'")
-        return []
-
-    # ── embedded JSON ─────────────────────────────────────────────────────────
-
-    def _from_embedded(self, html: str, limit: int) -> list[ProductItem]:
-        results: list[ProductItem] = []
-
-        soup = BeautifulSoup(html[:800_000], "lxml")
-        for tag in soup.find_all("script", {"type": "application/json"}):
-            try:
-                data = json.loads(tag.string or "")
-                for node in self._walk(data):
-                    p = self._from_node(node)
-                    if p:
-                        results.append(p)
-                    if len(results) >= limit:
-                        return _dedupe(results)
-            except Exception:
-                continue
-
-        if results:
-            return _dedupe(results)
-
-        for m in re.finditer(
-            r'(?:window\.__(?:NUXT|INITIAL_STATE|STATE)__\s*=\s*|"widgetStates"\s*:\s*)(\{.{100,}?\}(?=[,;\s]|$))',
-            html[:1_000_000],
-            re.DOTALL,
-        ):
-            try:
-                data = json.loads(m.group(1))
-                for node in self._walk(data):
-                    p = self._from_node(node)
-                    if p:
-                        results.append(p)
-                    if len(results) >= limit:
-                        return _dedupe(results)
-            except Exception:
-                continue
-
-        return _dedupe(results)
-
-    def _walk(self, node, depth: int = 0):
-        if depth > 14:
+    def _walk(self, node, depth=0):
+        if depth > 13:
             return
         if isinstance(node, dict):
-            if self._is_product(node):
-                yield node
-            for v in node.values():
-                yield from self._walk(v, depth + 1)
+            yield node
+            for value in node.values():
+                yield from self._walk(value, depth + 1)
         elif isinstance(node, list):
-            for item in node[:200]:
+            for item in node[:350]:
                 yield from self._walk(item, depth + 1)
-        elif isinstance(node, str):
-            text = node.strip()
-            if 20 <= len(text) <= 200_000 and text[0] in "{[":
-                try:
-                    yield from self._walk(json.loads(text), depth + 1)
-                except Exception:
-                    return
+        elif isinstance(node, str) and ("/product/" in node or "ozon.ru/product/" in node):
+            yield {"url": node}
 
-    def _is_product(self, d: dict) -> bool:
-        keys = set(d.keys())
-        action = d.get("action")
-        direct_link = d.get("link") or d.get("url") or (action.get("link") if isinstance(action, dict) else None)
-        has_title = bool(keys & {"title", "name"}) or ("mainState" in keys and bool(self._text_candidates(d)))
-        has_link = isinstance(direct_link, str) and ("/product/" in direct_link or "ozon.ru/product/" in direct_link)
-        has_price = bool(keys & {"price", "finalPrice", "cardPrice", "priceWithCard"}) or ("mainState" in keys and bool(
-            self._extract_price(d)
-        ))
-        return has_title and has_link and has_price
-
-    def _from_node(self, d: dict) -> Optional[ProductItem]:
-        title = self._extract_title(d)
-        if not title or len(str(title)) < 3:
-            return None
-
-        link = self._extract_link(d)
-        if not link:
-            return None
-
-        url = f"https://www.ozon.ru{link}" if link.startswith("/") else link
-
-        price = self._extract_price(d)
-        image_url = self._extract_image(d)
-
-        chars: dict = {}
-        brand = d.get("brand") or d.get("brandName")
-        if brand:
-            chars["Бренд"] = str(brand)
-
-        return ProductItem(
-            title=str(title).strip()[:300],
-            price=price,
-            id=self._extract_id(d),
-            image_url=image_url,
-            product_url=url,
-            source=self.source_name,
-            domain=self.domain,
-            characteristics=chars,
-        )
-
-    def _extract_title(self, node: dict) -> Optional[str]:
-        title = node.get("title") or node.get("name")
-        if isinstance(title, dict):
-            title = title.get("text") or title.get("content")
-        if isinstance(title, str) and len(title.strip()) >= 3:
-            return title.strip()
-
-        for text in self._text_candidates(node):
-            if "₽" not in text and len(text) >= 5:
-                return text
-        return None
-
-    def _extract_link(self, node) -> Optional[str]:
-        if isinstance(node, dict):
-            action = node.get("action")
-            for value in (node.get("link"), node.get("url"), action.get("link") if isinstance(action, dict) else None):
-                if isinstance(value, str) and ("/product/" in value or "ozon.ru/product/" in value):
-                    return value
-            for value in node.values():
-                found = self._extract_link(value)
-                if found:
-                    return found
-        elif isinstance(node, list):
-            for item in node[:80]:
-                found = self._extract_link(item)
-                if found:
-                    return found
-        return None
-
-    def _extract_price(self, node) -> Optional[float]:
-        if isinstance(node, dict):
-            for key in ("price", "finalPrice", "cardPrice", "priceWithCard"):
-                price = _price(node.get(key))
-                if price:
-                    return price
-            for value in node.values():
-                price = self._extract_price(value)
-                if price:
-                    return price
-        elif isinstance(node, list):
-            for item in node[:100]:
-                price = self._extract_price(item)
-                if price:
-                    return price
-        elif isinstance(node, str):
-            return _price(node)
-        return None
-
-    def _extract_image(self, node) -> Optional[str]:
-        if isinstance(node, dict):
-            for key in ("image", "imageUrl", "mainImage", "tileImage", "coverImage", "src"):
-                val = node.get(key)
-                if isinstance(val, str) and ("http" in val or val.startswith("//")):
-                    return "https:" + val if val.startswith("//") else val
-                if isinstance(val, dict):
-                    nested = self._extract_image(val)
-                    if nested:
-                        return nested
-            for value in node.values():
-                found = self._extract_image(value)
-                if found:
-                    return found
-        elif isinstance(node, list):
-            for item in node[:80]:
-                found = self._extract_image(item)
-                if found:
-                    return found
-        elif isinstance(node, str) and re.search(r"https?://.*\.(?:jpg|jpeg|png|webp)", node):
-            return node
-        return None
-
-    def _extract_id(self, node: dict) -> Optional[str]:
-        for key in ("id", "sku", "productId", "offerId"):
+    def _link(self, node) -> str:
+        for key in ("link", "url", "productUrl", "href"):
             value = node.get(key)
-            if value:
-                return str(value)
-        link = self._extract_link(node) or ""
-        match = re.search(r"-(\d+)/?\?", link) or re.search(r"/product/[^/]+-(\d+)/?", link)
-        return match.group(1) if match else None
+            if isinstance(value, str) and ("/product/" in value or "ozon.ru/product/" in value):
+                return value
+        action = node.get("action")
+        if isinstance(action, dict):
+            link = self._link(action)
+            if link:
+                return link
+        for value in node.values():
+            if isinstance(value, dict):
+                link = self._link(value)
+                if link:
+                    return link
+        return ""
 
-    def _text_candidates(self, node, depth: int = 0):
-        if depth > 6:
-            return []
-        out: list[str] = []
-        if isinstance(node, dict):
-            for key in ("text", "content"):
-                value = node.get(key)
-                if isinstance(value, str):
-                    clean = re.sub(r"\s+", " ", value).strip()
-                    if clean:
-                        out.append(clean)
-            for value in node.values():
-                out.extend(self._text_candidates(value, depth + 1))
-        elif isinstance(node, list):
-            for item in node[:80]:
-                out.extend(self._text_candidates(item, depth + 1))
+    def _price(self, node) -> float:
+        for key in ("price", "finalPrice", "cardPrice", "priceWithCard", "currentPrice"):
+            price = normalize_price(node.get(key))
+            if price:
+                return price
+        for value in node.values():
+            if isinstance(value, dict):
+                price = self._price(value)
+                if price:
+                    return price
+        return 0
+
+    def _image(self, node) -> str:
+        for key in ("image", "imageUrl", "mainImage", "tileImage", "src", "coverImage"):
+            value = node.get(key)
+            if isinstance(value, str) and ("http" in value or value.startswith("//")):
+                return normalize_url(value)
+            if isinstance(value, dict):
+                nested = self._image(value)
+                if nested:
+                    return nested
+        return ""
+
+    def _text(self, node) -> str:
+        for value in node.values():
+            if isinstance(value, dict) and isinstance(value.get("text"), str) and len(value["text"]) > 5:
+                return value["text"]
+        return ""
+
+    def _dedupe(self, items: list[ProductItem]) -> list[ProductItem]:
+        seen, out = set(), []
+        for item in items:
+            key = (item.url or item.title).split("?")[0]
+            if key and key not in seen:
+                seen.add(key)
+                out.append(item)
         return out
-
-    # ── DOM fallback ──────────────────────────────────────────────────────────
-
-    def _from_dom(self, html: str, limit: int) -> list[ProductItem]:
-        soup = BeautifulSoup(html[:600_000], "lxml")
-        results: list[ProductItem] = []
-
-        for a in soup.select('a[href*="/product/"]'):
-            href  = a.get("href", "")
-            title = a.get_text(" ", strip=True)
-            if not href or len(title) < 4:
-                continue
-
-            parent = a.find_parent("div") or a
-            parent_text = parent.get_text(" ", strip=True)
-            price = _price(parent_text)
-
-            img = parent.select_one("img")
-            image_url = img.get("src") if img else None
-
-            url = f"https://www.ozon.ru{href}" if href.startswith("/") else href
-            results.append(ProductItem(
-                title=title[:300],
-                price=price,
-                image_url=image_url,
-                product_url=url,
-                source=self.source_name,
-                domain=self.domain,
-            ))
-            if len(results) >= limit:
-                break
-
-        return _dedupe(results)
-
-    async def _search_playwright(self, query: str, limit: int) -> list[ProductItem]:
-        try:
-            from app.parsers.browser import new_page
-        except ImportError:
-            return []
-
-        page = None
-        try:
-            page = await new_page()
-            url = f"https://www.ozon.ru/search/?text={quote_plus(query)}&from_global=true"
-            await page.goto(url, wait_until="domcontentloaded", timeout=25_000)
-            # Ждём рендеринга продуктов
-            try:
-                await page.wait_for_selector('a[href*="/product/"]', timeout=10_000)
-            except Exception:
-                pass
-            html = await page.content()
-            return self._from_embedded(html, limit) or self._from_dom(html, limit)
-        except Exception as exc:
-            logger.warning(f"[Ozon Playwright] {exc}")
-            return []
-        finally:
-            if page:
-                try:
-                    await page.context.close()
-                except Exception:
-                    pass
-
-
-def _dedupe(items: list[ProductItem]) -> list[ProductItem]:
-    seen: set[str] = set()
-    out: list[ProductItem] = []
-    for item in items:
-        key = item.product_url.split("?")[0]
-        if key not in seen:
-            seen.add(key)
-            out.append(item)
-    return out

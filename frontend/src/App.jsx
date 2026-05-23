@@ -54,10 +54,10 @@ export default function App() {
 
         {results && (
           <CorrectionBanner
-            original={results.original_query}
-            corrected={results.query?.corrected || results.corrected_query}
-            variants={results.search_variants || results.query?.expanded || []}
-            synonyms={results.used_synonyms || results.query?.used_synonyms || {}}
+            original={results.query}
+            corrected={results.normalizedQuery}
+            variants={results.expandedQueries || []}
+            synonyms={{}}
           />
         )}
 
@@ -77,8 +77,8 @@ export default function App() {
         )}
 
         {(results || loading) && (
-          results && !loading && results.total_items === 0 ? (
-            <ErrorState query={results.original_query} warnings={results.meta?.warnings || []} />
+          results && !loading && (results.summary?.totalFound || 0) === 0 ? (
+            <ErrorState query={results.query} warnings={[]} />
           ) : (
             <ResultsSection
               results={results}
