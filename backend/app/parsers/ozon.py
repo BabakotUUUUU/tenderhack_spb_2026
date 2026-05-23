@@ -1,3 +1,4 @@
+import asyncio
 import re
 from urllib.parse import quote_plus, urlparse
 
@@ -12,6 +13,11 @@ class OzonParser:
 
     async def search(self, query: str, region: str = "Москва", limit: int = 10, category: str = "") -> SourceResult:
         search_url = f"https://www.ozon.ru/search/?text={quote_plus(query)}&from_global=true"
+        search_urls = [
+            search_url,
+            f"https://www.ozon.ru/search/?from_global=true&text={quote_plus(query)}",
+            f"https://www.ozon.ru/search/?deny_category_prediction=true&text={quote_plus(query)}",
+        ]
         items: list[ProductItem] = []
         candidate_html = ""
 
@@ -20,17 +26,36 @@ class OzonParser:
             if composer:
                 items = self._items_from_json(composer, region, category, limit)
 
-            resp = await fetcher.get_text(search_url, source=self.source, headers=browser_headers(source=self.source), retries=1)
-            if resp.text and not resp.blocked:
-                candidate_html = resp.text
+            resp = None
+            if not items:
+                for url in search_urls[:2]:
+                    try:
+                        resp = await asyncio.wait_for(
+                            fetcher.get_text(url, source=self.source, headers=browser_headers(source=self.source), retries=0),
+                            timeout=4,
+                        )
+                    except Exception:
+                        continue
+                    if resp.text and not resp.blocked:
+                        candidate_html = resp.text
+                        search_url = url
+                        break
 
-            if not items and resp.blocked:
-                rendered = await fetch_rendered_html(
-                    search_url,
-                    referer="https://www.ozon.ru/",
-                    wait_selectors=['a[href*="/product/"]', '[data-widget*="searchResults" i]'],
-                    scroll_steps=4,
-                )
+            if not items and resp and resp.blocked:
+                try:
+                    rendered = await asyncio.wait_for(
+                        fetch_rendered_html(
+                            search_url,
+                            referer="https://www.ozon.ru/",
+                            wait_selectors=['a[href*="/product/"]', '[data-widget*="searchResults" i]'],
+                            scroll_steps=2,
+                        ),
+                        timeout=8,
+                    )
+                except Exception:
+                    rendered = None
+                if not rendered:
+                    return SourceResult(self.source, "empty", errorReason="Ozon browser fallback timeout")
                 if rendered.status == "blocked" and not rendered.product_payloads:
                     return SourceResult(
                         self.source,
@@ -54,8 +79,11 @@ class OzonParser:
                 links = extract_product_links(candidate_html, search_url)
                 items = await self._details_from_links(fetcher, links, region, category, limit)
             else:
-                for idx, item in enumerate(items[: min(limit, 5)]):
-                    detail = await self._detail(fetcher, item.url, region, category)
+                for idx, item in enumerate(items[: min(limit, 3)]):
+                    try:
+                        detail = await asyncio.wait_for(self._detail(fetcher, item.url, region, category), timeout=3)
+                    except Exception:
+                        detail = None
                     items[idx] = merge_product_data(item, detail)
 
         items = self._dedupe(items)[:limit]
@@ -70,7 +98,13 @@ class OzonParser:
         headers = browser_headers("https://www.ozon.ru/", self.source)
         headers["Accept"] = "application/json, text/plain, */*"
         for endpoint in endpoints:
-            resp = await fetcher.get_json(endpoint, source=self.source, headers=headers, retries=1)
+            try:
+                resp = await asyncio.wait_for(
+                    fetcher.get_json(endpoint, source=self.source, headers=headers, retries=0),
+                    timeout=3,
+                )
+            except Exception:
+                continue
             if resp.json_data and not resp.blocked:
                 return resp.json_data
         return None
@@ -131,12 +165,18 @@ class OzonParser:
             return None
         resp = await fetcher.get_text(url, source=self.source, referer="https://www.ozon.ru/", retries=0)
         if resp.blocked or not resp.text:
-            rendered = await fetch_rendered_html(
-                url,
-                referer="https://www.ozon.ru/",
-                wait_selectors=["h1", '[data-widget*="webProduct" i]', '[data-widget*="raShowcase" i]'],
-                scroll_steps=2,
-            )
+            try:
+                rendered = await asyncio.wait_for(
+                    fetch_rendered_html(
+                        url,
+                        referer="https://www.ozon.ru/",
+                        wait_selectors=["h1", '[data-widget*="webProduct" i]', '[data-widget*="raShowcase" i]'],
+                        scroll_steps=1,
+                    ),
+                    timeout=6,
+                )
+            except Exception:
+                return None
             if rendered.status == "blocked" and not rendered.product_payloads:
                 return None
             if rendered.product_payloads:

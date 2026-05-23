@@ -1,3 +1,4 @@
+import asyncio
 import re
 from urllib.parse import quote_plus
 
@@ -15,23 +16,46 @@ class YandexMarketParser:
     async def search(self, query: str, region: str = "Москва", limit: int = 10, category: str = "") -> SourceResult:
         rid = REGION_IDS.get((region or "").lower(), 213)
         search_url = f"https://market.yandex.ru/search?text={quote_plus(query)}&lr={rid}"
+        search_urls = [
+            search_url,
+            f"https://market.yandex.ru/search?cvredirect=0&text={quote_plus(query)}&lr={rid}",
+            f"https://market.yandex.ru/search?hid=&text={quote_plus(query)}&lr={rid}",
+        ]
         items: list[ProductItem] = []
         candidate_html = ""
 
         async with Fetcher() as fetcher:
             headers = browser_headers(source=self.source)
             headers["Cookie"] = f"_region_id={rid}; yandex_gid={rid};"
-            resp = await fetcher.get_text(search_url, source=self.source, headers=headers, retries=1)
-            if resp.text and not resp.blocked:
-                candidate_html = resp.text
+            resp = None
+            for url in search_urls[:2]:
+                try:
+                    resp = await asyncio.wait_for(
+                        fetcher.get_text(url, source=self.source, headers=headers, retries=0),
+                        timeout=4,
+                    )
+                except Exception:
+                    continue
+                if resp.text and not resp.blocked:
+                    candidate_html = resp.text
+                    search_url = url
+                    break
 
-            if resp.blocked:
-                rendered = await fetch_rendered_html(
-                    search_url,
-                    referer="https://market.yandex.ru/",
-                    wait_selectors=['[data-zone-name*="product" i]', "article", 'a[href*="/product"]'],
-                    scroll_steps=4,
-                )
+            if resp and resp.blocked:
+                try:
+                    rendered = await asyncio.wait_for(
+                        fetch_rendered_html(
+                            search_url,
+                            referer="https://market.yandex.ru/",
+                            wait_selectors=['[data-zone-name*="product" i]', "article", 'a[href*="/product"]'],
+                            scroll_steps=2,
+                        ),
+                        timeout=8,
+                    )
+                except Exception:
+                    rendered = None
+                if not rendered:
+                    return SourceResult(self.source, "empty", errorReason="Yandex Market browser fallback timeout")
                 if rendered.status == "blocked" and not rendered.product_payloads:
                     return SourceResult(
                         self.source,
@@ -53,8 +77,11 @@ class YandexMarketParser:
             if not items:
                 items = await self._details_from_links(fetcher, extract_product_links(candidate_html, search_url), region, category, limit)
             else:
-                for idx, item in enumerate(items[: min(limit, 5)]):
-                    detail = await self._detail(fetcher, item.url, region, category)
+                for idx, item in enumerate(items[: min(limit, 3)]):
+                    try:
+                        detail = await asyncio.wait_for(self._detail(fetcher, item.url, region, category), timeout=3)
+                    except Exception:
+                        detail = None
                     items[idx] = merge_product_data(item, detail)
 
         items = self._dedupe(items)[:limit]
@@ -118,12 +145,18 @@ class YandexMarketParser:
             return None
         resp = await fetcher.get_text(url, source=self.source, referer="https://market.yandex.ru/", retries=0)
         if resp.blocked or not resp.text:
-            rendered = await fetch_rendered_html(
-                url,
-                referer="https://market.yandex.ru/",
-                wait_selectors=["h1", '[data-zone-name*="product" i]', "article"],
-                scroll_steps=2,
-            )
+            try:
+                rendered = await asyncio.wait_for(
+                    fetch_rendered_html(
+                        url,
+                        referer="https://market.yandex.ru/",
+                        wait_selectors=["h1", '[data-zone-name*="product" i]', "article"],
+                        scroll_steps=1,
+                    ),
+                    timeout=6,
+                )
+            except Exception:
+                return None
             if rendered.status == "blocked" and not rendered.product_payloads:
                 return None
             if rendered.product_payloads:

@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 _playwright = None
 _browser = None
 _lock = asyncio.Lock()
-_browser_semaphore = asyncio.Semaphore(int(os.getenv("BROWSER_CONCURRENCY", "1")))
+_browser_semaphore = asyncio.Semaphore(int(os.getenv("BROWSER_CONCURRENCY", "2")))
 
 
 @dataclass

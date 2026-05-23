@@ -1,3 +1,4 @@
+import asyncio
 from urllib.parse import quote_plus
 
 from app.parsers.browser import fetch_rendered_html
@@ -57,8 +58,14 @@ class WildberriesParser:
         }
         async with Fetcher() as fetcher:
             blocked_reason = ""
-            for endpoint in SEARCH_ENDPOINTS:
-                resp = await fetcher.get_json(endpoint, source=self.source, headers=json_headers(source=self.source), params=params, retries=1)
+            for endpoint in SEARCH_ENDPOINTS[:2]:
+                try:
+                    resp = await asyncio.wait_for(
+                        fetcher.get_json(endpoint, source=self.source, headers=json_headers(source=self.source), params=params, retries=0),
+                        timeout=4,
+                    )
+                except Exception:
+                    continue
                 if resp.blocked:
                     blocked_reason = f"HTTP {resp.status_code}: blocked by Wildberries"
                     continue
@@ -70,12 +77,27 @@ class WildberriesParser:
                 if items:
                     break
 
-            for idx, item in enumerate(items[: min(limit, 6)]):
-                detail = await self._detail(fetcher, item.productId, item.url, region, category)
+            for idx, item in enumerate(items[: min(limit, 3)]):
+                try:
+                    detail = await asyncio.wait_for(self._detail(fetcher, item.productId, item.url, region, category), timeout=2.5)
+                except Exception:
+                    detail = None
                 items[idx] = merge_product_data(item, detail)
 
         if not items:
-            rendered = await fetch_rendered_html(f"https://www.wildberries.ru/catalog/0/search.aspx?search={quote_plus(query)}", referer="https://www.wildberries.ru/")
+            try:
+                rendered = await asyncio.wait_for(
+                    fetch_rendered_html(
+                        f"https://www.wildberries.ru/catalog/0/search.aspx?search={quote_plus(query)}",
+                        referer="https://www.wildberries.ru/",
+                        scroll_steps=2,
+                    ),
+                    timeout=7,
+                )
+            except Exception:
+                rendered = None
+            if not rendered:
+                return SourceResult(self.source, "empty", errorReason=blocked_reason)
             if rendered.status == "blocked":
                 return SourceResult(self.source, "blocked", errorReason=rendered.errorReason or blocked_reason)
             links = extract_product_links(rendered.html, "https://www.wildberries.ru/")
@@ -131,7 +153,7 @@ class WildberriesParser:
 
     async def _detail(self, fetcher: Fetcher, nm_id: str, url: str, region: str, category: str) -> ProductItem | None:
         detail_url = f"https://card.wb.ru/cards/v2/detail?appType=1&curr=rub&dest={_dest(region)}&spp=30&nm={nm_id}"
-        resp = await fetcher.get_json(detail_url, source=self.source, referer="https://www.wildberries.ru/", retries=1)
+        resp = await fetcher.get_json(detail_url, source=self.source, referer="https://www.wildberries.ru/", retries=0)
         products = (((resp.json_data or {}).get("data") or {}).get("products") or [])
         card_meta = await self._card_metadata(fetcher, nm_id)
         if products:

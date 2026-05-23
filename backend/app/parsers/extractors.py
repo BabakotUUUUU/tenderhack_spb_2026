@@ -165,6 +165,54 @@ def extract_characteristics_from_json(data: Any, limit: int = 80) -> dict[str, A
     return chars
 
 
+def extract_geo_from_json(data: Any) -> dict[str, Any]:
+    geo = default_geo("")
+
+    def set_text(key: str, value: Any) -> None:
+        text = clean_text(value)
+        if text and not geo.get(key):
+            geo[key] = text
+
+    for node in _walk(data):
+        if not isinstance(node, dict):
+            continue
+        address = node.get("address")
+        if isinstance(address, dict):
+            address_text = clean_text(", ".join(str(x) for x in [
+                address.get("addressLocality"),
+                address.get("streetAddress"),
+                address.get("postalCode"),
+            ] if x))
+            set_text("storeAddress", address_text)
+            set_text("pickupAddress", address_text)
+            set_text("city", address.get("addressLocality"))
+            set_text("detectedRegion", address.get("addressRegion") or address.get("addressLocality"))
+        elif address:
+            set_text("storeAddress", address)
+            set_text("pickupAddress", address)
+
+        geo_node = node.get("geo") if isinstance(node.get("geo"), dict) else node
+        lat = geo_node.get("latitude") or geo_node.get("lat")
+        lon = geo_node.get("longitude") or geo_node.get("lng") or geo_node.get("lon")
+        try:
+            if lat is not None and lon is not None:
+                geo["latitude"] = float(str(lat).replace(",", "."))
+                geo["longitude"] = float(str(lon).replace(",", "."))
+        except Exception:
+            pass
+
+        for source_key, target_key in (
+            ("city", "city"),
+            ("town", "city"),
+            ("addressLocality", "city"),
+            ("region", "deliveryRegion"),
+            ("deliveryRegion", "deliveryRegion"),
+        ):
+            if node.get(source_key):
+                set_text(target_key, node.get(source_key))
+    return geo
+
+
 def extract_product_links(html: str, base_url: str) -> list[str]:
     if BeautifulSoup is None:
         links = []
@@ -291,6 +339,11 @@ def extract_description(html: str) -> str:
 def extract_geo(html: str) -> dict[str, Any]:
     text = clean_text(BeautifulSoup(html or "", "lxml").get_text(" ", strip=True)) if BeautifulSoup is not None else clean_text(html)
     geo = default_geo("")
+    for data in extract_jsonld_products(html) + extract_microdata(html) + extract_embedded_json(html):
+        json_geo = extract_geo_from_json(data)
+        for key, value in json_geo.items():
+            if value not in ("", None) and not geo.get(key):
+                geo[key] = value
     city = re.search(r"(Москва|Санкт-Петербург|Новосибирск|Екатеринбург|Казань|Краснодар)", text, re.I)
     if city:
         geo["detectedRegion"] = city.group(1)
@@ -298,6 +351,13 @@ def extract_geo(html: str) -> dict[str, Any]:
     address = re.search(r"(?:адрес|самовывоз|пункт выдачи)[:\s]+(.{10,120})", text, re.I)
     if address:
         geo["pickupAddress"] = clean_text(address.group(1))
+    coords = re.search(r"(?<!\d)([45]\d\.\d{3,}|6[0-9]\.\d{3,})[,;\s]+([3-5]\d\.\d{3,})", text)
+    if coords:
+        try:
+            geo["latitude"] = float(coords.group(1))
+            geo["longitude"] = float(coords.group(2))
+        except Exception:
+            pass
     return geo
 
 
@@ -326,6 +386,7 @@ def _product_from_mapping(data: dict[str, Any], url: str, source: str) -> Produc
         images=[normalize_url(str(i), url) for i in images if i],
         url=normalize_url(data.get("url") or url, url),
         description=clean_text(data.get("description"))[:2000],
+        geo=extract_geo_from_json(data),
         characteristics=extract_characteristics_from_json(data, limit=80),
     )
 

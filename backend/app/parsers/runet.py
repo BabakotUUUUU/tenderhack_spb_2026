@@ -4,7 +4,7 @@ from urllib.parse import quote_plus, urlparse
 from xml.etree import ElementTree
 
 from app.parsers.browser import fetch_rendered_html
-from app.parsers.common import ProductItem, SourceResult, default_geo
+from app.parsers.common import ProductItem, SourceResult, clean_text, default_geo, normalize_price
 from app.parsers.extractors import extract_product_from_html, extract_product_links
 from app.parsers.http_client import Fetcher, browser_headers
 
@@ -25,18 +25,25 @@ ADAPTERS = {
     "4tochki.ru": {
         "search": ["https://4tochki.ru/search/?q={q}", "https://4tochki.ru/catalog/tyres/?q={q}"],
         "allow": ["/catalog/tires/", "/catalog/tyres/", "/products/tyres/", "/tyres/"],
+        "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})", r"Производитель[:\s]+([^;,.|]{2,60})"],
+        "stock_patterns": [r"(?:наличие|остаток|склад)[:\s]+([^.!?]{2,80})"],
     },
     "foroffice.ru": {
         "search": ["https://www.foroffice.ru/search/?q={q}", "https://foroffice.ru/search/?q={q}"],
         "allow": ["/products/", "/catalog/"],
+        "brand_patterns": [r"Производитель[:\s]+([^;,.|]{2,60})", r"Бренд[:\s]+([^;,.|]{2,60})"],
+        "seller": "foroffice.ru",
     },
     "oldi.ru": {
         "search": ["https://www.oldi.ru/search/?text={q}", "https://oldi.ru/search/?text={q}"],
         "allow": ["/catalog/element/", "/catalog/"],
+        "brand_patterns": [r"Бренд[:\s]+([^;,.|]{2,60})", r"Производитель[:\s]+([^;,.|]{2,60})"],
+        "seller": "OLDI",
     },
     "price.ru": {
         "search": ["https://price.ru/search/?query={q}", "https://price.ru/search/?q={q}"],
         "allow": ["/product/", "/offers/"],
+        "seller_patterns": [r"Магазин[:\s]+([^.!?]{2,80})", r"Продавец[:\s]+([^.!?]{2,80})"],
     },
 }
 
@@ -67,27 +74,56 @@ class RunetParser:
         patterns = adapter.get("search") or SEARCH_PATTERNS
         for pattern in patterns:
             url = pattern.format(host=host, q=q)
-            resp = await fetcher.get_text(url, source=self.source, headers=browser_headers(referer=base_url, source=self.source), retries=0)
-            if resp.blocked:
-                rendered = await fetch_rendered_html(
-                    url,
-                    referer=base_url,
-                    wait_selectors=['a[href*="/catalog/"]', 'a[href*="/product"]', ".product", ".item"],
-                    scroll_steps=3,
+            try:
+                resp = await asyncio.wait_for(
+                    fetcher.get_text(url, source=self.source, headers=browser_headers(referer=base_url, source=self.source), retries=0),
+                    timeout=4,
                 )
-                html = rendered.html if rendered.status != "blocked" else ""
+            except Exception:
+                continue
+            if resp.blocked:
+                try:
+                    rendered = await asyncio.wait_for(
+                        fetch_rendered_html(
+                            url,
+                            referer=base_url,
+                            wait_selectors=['a[href*="/catalog/"]', 'a[href*="/product"]', ".product", ".item"],
+                            scroll_steps=1,
+                        ),
+                        timeout=5,
+                    )
+                except Exception:
+                    rendered = None
+                html = rendered.html if rendered and rendered.status != "blocked" else ""
             else:
                 html = resp.text
             links = self._filter_links(extract_product_links(html, url), host, adapter)
             if links:
                 break
         if not links:
-            links = await self._discover_links_from_sitemaps(fetcher, host, query, category, limit * 4)
-        for link in links[: limit * 2]:
-            detail = await fetcher.get_text(link, source=self.source, referer=base_url, retries=0)
+            try:
+                links = await asyncio.wait_for(self._discover_links_from_sitemaps(fetcher, host, query, category, limit * 3), timeout=4)
+            except Exception:
+                links = []
+        for link in links[:limit]:
+            try:
+                detail = await asyncio.wait_for(
+                    fetcher.get_text(link, source=self.source, referer=base_url, retries=0),
+                    timeout=4,
+                )
+            except Exception:
+                continue
             detail_html = detail.text
             if detail.blocked or not detail_html:
-                rendered = await fetch_rendered_html(link, referer=base_url, wait_selectors=["h1", ".product", ".price"], scroll_steps=2)
+                try:
+                    rendered = await asyncio.wait_for(
+                        fetch_rendered_html(link, referer=base_url, wait_selectors=["h1", ".product", ".price"], scroll_steps=1),
+                        timeout=5,
+                    )
+                except Exception:
+                    rendered = None
+                if not rendered:
+                    continue
                 if rendered.status == "blocked" or not rendered.html:
                     continue
                 detail_html = rendered.html
@@ -100,11 +136,42 @@ class RunetParser:
             item.category = category
             item.region = region
             item.geo = default_geo(region) | {k: v for k, v in item.geo.items() if v}
+            self._apply_host_adapter(item, detail_html, adapter)
             self._enrich_geo_availability(item, detail_html, region)
             items.append(item)
             if len(items) >= limit:
                 break
         return items
+
+    def _apply_host_adapter(self, item: ProductItem, html: str, adapter: dict) -> None:
+        text = clean_text(re.sub(r"<[^>]+>", " ", html or ""))
+        if adapter.get("seller") and not item.seller:
+            item.seller = adapter["seller"]
+        for pattern in adapter.get("seller_patterns", []):
+            match = re.search(pattern, text, re.I)
+            if match and not item.seller:
+                item.seller = clean_text(match.group(1))
+        for pattern in adapter.get("brand_patterns", []):
+            match = re.search(pattern, text, re.I)
+            if match and not item.brand:
+                item.brand = clean_text(match.group(1))
+                item.characteristics.setdefault("brand", item.brand)
+        for pattern in adapter.get("stock_patterns", []):
+            match = re.search(pattern, text, re.I)
+            if match:
+                item.characteristics.setdefault("stockRaw", clean_text(match.group(1)))
+        if not item.price:
+            price_match = re.search(r"(?:цена|стоимость)[^\d]{0,20}(\d[\d\s]{2,12})\s*(?:₽|руб)", text, re.I)
+            if price_match:
+                item.price = normalize_price(price_match.group(1))
+        # Common shop pages often expose coordinates in map widgets.
+        coord_match = re.search(r"(?<!\d)([45]\d\.\d{3,}|6[0-9]\.\d{3,})[,;\s]+([3-5]\d\.\d{3,})", text)
+        if coord_match and item.geo.get("latitude") is None:
+            try:
+                item.geo["latitude"] = float(coord_match.group(1))
+                item.geo["longitude"] = float(coord_match.group(2))
+            except Exception:
+                pass
 
     async def _discover_links_from_sitemaps(self, fetcher: Fetcher, host: str, query: str, category: str, limit: int) -> list[str]:
         sitemap_urls = [f"https://{host}/sitemap.xml", f"https://{host}/sitemap_index.xml"]
